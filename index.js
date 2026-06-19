@@ -34,9 +34,30 @@ app.post('/webhook', (req, res) => {
                 let payload = webhook_event.message.quick_reply.payload;
                 handleQuickReply(sender_psid, payload, memberName);
             } 
-            // TẦNG 1: XỬ LÝ KHI THÀNH VIÊN GỬI LINK
-            else if (webhook_event.message && webhook_event.message.text) {
-                handleMessage(sender_psid, webhook_event.message.text);
+            // TẦNG 1: XỬ LÝ KHI THÀNH VIÊN GỬI LINK HOẶC BẤM NÚT SHARE TỪ APP
+            else if (webhook_event.message) {
+                let extractedLink = null;
+
+                // 1. Nếu gửi bằng text (Copy & Paste)
+                if (webhook_event.message.text) {
+                    extractedLink = webhook_event.message.text;
+                }
+                // 2. Nếu gửi bằng nút Share từ điện thoại (Attachment)
+                else if (webhook_event.message.attachments) {
+                    let attachment = webhook_event.message.attachments[0];
+                    // Link Share thường nằm trong payload.url
+                    if (attachment.payload && attachment.payload.url) {
+                        extractedLink = attachment.payload.url;
+                    }
+                }
+
+                // Nếu moi được link ra thì mang đi xử lý
+                if (extractedLink) {
+                    handleMessage(sender_psid, extractedLink);
+                } else {
+                    // Nếu gửi ảnh, sticker... thì báo lỗi
+                    callSendAPI(sender_psid, { "text": "🤖 Vui lòng gửi Link Facebook cá nhân nhé, mình không hiểu định dạng này." });
+                }
             }
         });
         res.status(200).send('EVENT_RECEIVED');
