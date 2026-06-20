@@ -58,12 +58,12 @@ app.post('/webhook', (req, res) => {
 
                 // TẦNG 1: XỬ LÝ KHI THÀNH VIÊN GỬI LINK HOẶC BẤM NÚT SHARE TỪ APP
                 if (webhook_event.message) {
-                    const extractedLinks = extractIncomingLinks(webhook_event.message);
+                    const extractedLinks = collectIncomingLinks(webhook_event.message);
 
                     if (extractedLinks.length === 1) {
-                        handleMessage(sender_psid, extractedLinks[0], memberName);
+                        handleMessage(sender_psid, extractedLinks[0], memberName).catch(error => console.error(error));
                     } else if (extractedLinks.length > 1) {
-                        handleBatchMessage(sender_psid, extractedLinks, memberName);
+                        handleBatchMessage(sender_psid, extractedLinks, memberName).catch(error => console.error(error));
                     } else {
                         callSendAPI(sender_psid, { "text": "🤖 Vui lòng gửi Link Facebook cá nhân nhé, mình không hiểu định dạng này." });
                     }
