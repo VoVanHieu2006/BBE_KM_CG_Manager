@@ -8,6 +8,11 @@ function extractFacebookID(text) {
         let rawUrl = matches[0];
         const cleanUrl = new URL(rawUrl);
         
+        // 🔒 BƯỚC 0: Kiểm tra xem URL có phải từ facebook.com không
+        const hostname = cleanUrl.hostname;
+        const isFacebookUrl = hostname.includes('facebook.com') || hostname.includes('fb.com');
+        if (!isFacebookUrl) return null; // Reject non-Facebook URLs (stickers, images, etc.)
+        
         // 2. Xóa thông số rác
         cleanUrl.searchParams.delete('mibextid');
         cleanUrl.searchParams.delete('eav');

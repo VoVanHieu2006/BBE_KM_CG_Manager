@@ -40,14 +40,29 @@ app.post('/webhook', (req, res) => {
 
                 // 1. Nếu gửi bằng text (Copy & Paste)
                 if (webhook_event.message.text) {
-                    extractedLink = webhook_event.message.text;
+                    // Kiểm tra text có chứa URL không trước khi xử lý
+                    const urlRegex = /(https?:\/\/[^\s]+)/;
+                    if (urlRegex.test(webhook_event.message.text)) {
+                        extractedLink = webhook_event.message.text;
+                    }
                 }
                 // 2. Nếu gửi bằng nút Share từ điện thoại (Attachment)
                 else if (webhook_event.message.attachments) {
                     let attachment = webhook_event.message.attachments[0];
-                    // Link Share thường nằm trong payload.url
-                    if (attachment.payload && attachment.payload.url) {
-                        extractedLink = attachment.payload.url;
+                    // Chỉ xử lý share/link type attachments từ Facebook
+                    if (attachment.type === 'share' || (attachment.type === 'image' && attachment.payload && attachment.payload.url)) {
+                        if (attachment.payload && attachment.payload.url) {
+                            // Kiểm tra xem URL có phải từ facebook.com không
+                            try {
+                                const urlObj = new URL(attachment.payload.url);
+                                const isFacebookUrl = urlObj.hostname.includes('facebook.com') || urlObj.hostname.includes('fb.com');
+                                if (isFacebookUrl) {
+                                    extractedLink = attachment.payload.url;
+                                }
+                            } catch (e) {
+                                // URL không hợp lệ, bỏ qua
+                            }
+                        }
                     }
                 }
 
