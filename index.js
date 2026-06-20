@@ -189,7 +189,8 @@ async function handleBatchMessage(sender_psid, links, memberName) {
         "text": `📦 Phát hiện ${links.length} link Facebook hợp lệ. Chọn phân loại áp dụng cho toàn bộ danh sách:`,
         "quick_replies": [
             { "content_type": "text", "title": `👤 Khách Mời (${links.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('Khách mời')}|${batchId}` },
-            { "content_type": "text", "title": `🎓 Chuyên Gia (${links.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('Chuyên gia')}|${batchId}` }
+            { "content_type": "text", "title": `🎓 Chuyên Gia (${links.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('Chuyên gia')}|${batchId}` },
+            { "content_type": "text", "title": `⏭️ Bỏ qua (${links.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('BO_QUA')}|${batchId}` }
         ]
     };
 
@@ -202,7 +203,8 @@ function sendRoleSelection(sender_psid, linkData) {
         "text": "🎯 Khách này hợp lệ. Vui lòng chọn phân loại:",
         "quick_replies": [
             { "content_type": "text", "title": "👤 Khách Mời", "payload": `ROLE|${encodeURIComponent('Khách mời')}|${encodeURIComponent(linkData.guestId)}|${encodeURIComponent(linkData.canonicalUrl)}` },
-            { "content_type": "text", "title": "🎓 Chuyên Gia", "payload": `ROLE|${encodeURIComponent('Chuyên gia')}|${encodeURIComponent(linkData.guestId)}|${encodeURIComponent(linkData.canonicalUrl)}` }
+            { "content_type": "text", "title": "🎓 Chuyên Gia", "payload": `ROLE|${encodeURIComponent('Chuyên gia')}|${encodeURIComponent(linkData.guestId)}|${encodeURIComponent(linkData.canonicalUrl)}` },
+            { "content_type": "text", "title": "⏭️ Bỏ qua", "payload": `ROLE|${encodeURIComponent('BO_QUA')}|${encodeURIComponent(linkData.guestId)}|${encodeURIComponent(linkData.canonicalUrl)}` }
         ]
     };
     callSendAPI(sender_psid, response);
@@ -211,12 +213,18 @@ function sendRoleSelection(sender_psid, linkData) {
 // --- HÀM XỬ LÝ LƯỢT 2: KHI BẤM NÚT ---
 async function handleQuickReply(sender_psid, payload, memberName) {
     const parts = payload.split('|');
-    const type = parts[0]; // ROLE hoặc ACTION
+    const type = parts[0]; // ROLE, ACTION, BATCH_ROLE hoặc BATCH_ACTION
 
     if (type === 'ROLE') {
         const roleName = decodeURIComponent(parts[1] || 'Khách mời');
         const guestId = decodeURIComponent(parts[2] || '');
         const url = decodeURIComponent(parts[3] || '');
+
+        if (roleName === 'BO_QUA') {
+            callSendAPI(sender_psid, { "text": "⏭️ Đã bỏ qua thao tác. Dữ liệu giữ nguyên trạng thái cũ." });
+            return;
+        }
+
         try {
             // Lưu phân loại xuống sheet và lấy số lần mời hiện tại
             const result = await saveOrUpdateRole(guestId, url, memberName, roleName);
@@ -262,9 +270,43 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             return;
         }
 
+        if (roleName === 'BO_QUA') {
+            pendingBatches.delete(batchId);
+            callSendAPI(sender_psid, { "text": "⏭️ Đã bỏ qua list này. Dữ liệu giữ nguyên trạng thái cũ." });
+            return;
+        }
+
+        batch.selectedRole = roleName;
+
+        callSendAPI(sender_psid, {
+            "text": `📊 Hệ thống ghi nhận list này là [${roleName}].\n👉 Danh sách có ${batch.links.length} link hợp lệ.\n\nBạn muốn làm gì tiếp theo?`,
+            "quick_replies": [
+                { "content_type": "text", "title": "💌 Mời", "payload": `BATCH_ACTION|MOI|${encodeURIComponent(roleName)}|${batchId}` },
+                { "content_type": "text", "title": "🚫 Không mời lại", "payload": `BATCH_ACTION|KHONG_MOI|${encodeURIComponent(roleName)}|${batchId}` },
+                { "content_type": "text", "title": "⏩ Bỏ qua", "payload": `BATCH_ACTION|BO_QUA|${encodeURIComponent(roleName)}|${batchId}` }
+            ]
+        });
+    }
+
+    else if (type === 'BATCH_ACTION') {
+        const actionName = parts[1];
+        const roleName = decodeURIComponent(parts[2] || 'Khách mời');
+        const batchId = parts[3];
+        const batch = pendingBatches.get(batchId);
+
+        if (!batch || batch.sender_psid !== sender_psid) {
+            callSendAPI(sender_psid, { "text": "⚠️ Danh sách link tạm đã hết hạn hoặc không hợp lệ. Vui lòng gửi lại list." });
+            return;
+        }
+
         pendingBatches.delete(batchId);
 
-        const results = { created: 0, updated: 0, failed: 0 };
+        if (actionName === 'BO_QUA') {
+            callSendAPI(sender_psid, { "text": "⏭️ Đã bỏ qua list này. Dữ liệu giữ nguyên trạng thái cũ." });
+            return;
+        }
+
+        const results = { created: 0, updated: 0, invited: 0, doNotInvite: 0, failed: 0 };
 
         for (const link of batch.links) {
             try {
@@ -274,6 +316,16 @@ async function handleQuickReply(sender_psid, payload, memberName) {
                 } else if (saveResult.status === 'updated') {
                     results.updated += 1;
                 }
+
+                if (actionName === 'MOI') {
+                    const newCount = await incrementInviteCount(link.guestId, roleName);
+                    if (newCount > 0) {
+                        results.invited += 1;
+                    }
+                } else if (actionName === 'KHONG_MOI') {
+                    await markAsDoNotInvite(link.guestId, roleName);
+                    results.doNotInvite += 1;
+                }
             } catch (error) {
                 results.failed += 1;
                 console.error(error);
@@ -281,7 +333,9 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         }
 
         callSendAPI(sender_psid, {
-            "text": `✅ Đã xử lý list ${batch.links.length} link cho nhóm [${roleName}].\n- Mới thêm: ${results.created}\n- Cập nhật trùng: ${results.updated}\n- Lỗi: ${results.failed}`
+            "text": actionName === 'MOI'
+                ? `✅ Đã xử lý list ${batch.links.length} link cho nhóm [${roleName}].\n- Mới thêm: ${results.created}\n- Cập nhật trùng: ${results.updated}\n- Đã mời: ${results.invited}\n- Lỗi: ${results.failed}`
+                : `✅ Đã xử lý list ${batch.links.length} link cho nhóm [${roleName}].\n- Mới thêm: ${results.created}\n- Cập nhật trùng: ${results.updated}\n- Đã chuyển [Không mời lại]: ${results.doNotInvite}\n- Lỗi: ${results.failed}`
         });
     }
 }

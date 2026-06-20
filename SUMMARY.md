@@ -10,7 +10,7 @@ This bot now has three main improvements:
 
 2. **Batch link import**
    - The bot can now accept multiple Facebook links in one message.
-   - If more than one valid link is detected, it groups them into a temporary batch and asks for one role choice for the whole list.
+   - If more than one valid link is detected, it groups them into a temporary batch and keeps the same 3-action flow as the single-link case.
    - The batch expires after a short time to avoid stale imports.
 
 3. **More stable Facebook ID parsing**
@@ -30,6 +30,7 @@ This bot now has three main improvements:
 - Webhook retry duplicates are ignored using message ID caching.
 - Quick reply payloads are encoded to reduce parsing issues with special characters.
 - Legacy action payloads are still supported.
+- The role-selection step now also has a `skip` option.
 
 ## Files updated
 
