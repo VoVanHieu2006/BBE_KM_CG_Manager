@@ -1,59 +1,144 @@
-function extractFacebookID(text) {
-    try {
-        // 1. Cắt lấy đúng phần URL trong văn bản
-        const urlRegex = /(https?:\/\/[^\s]+)/g;
-        const matches = text.match(urlRegex);
-        if (!matches) return null;
-        
-        let rawUrl = matches[0];
-        const cleanUrl = new URL(rawUrl);
-        
-        // 🔒 BƯỚC 0: Kiểm tra xem URL có phải từ facebook.com không
-        const hostname = cleanUrl.hostname;
-        const isFacebookUrl = hostname.includes('facebook.com') || hostname.includes('fb.com');
-        if (!isFacebookUrl) return null; // Reject non-Facebook URLs (stickers, images, etc.)
-        
-        // 2. Xóa thông số rác
-        cleanUrl.searchParams.delete('mibextid');
-        cleanUrl.searchParams.delete('eav');
-        cleanUrl.searchParams.delete('paipv');
-        cleanUrl.searchParams.delete('rdid');
-        cleanUrl.searchParams.delete('share_url');
-        
-        const urlString = cleanUrl.toString();
+const crypto = require('crypto');
 
-        // 🟢 TRƯỜNG HỢP MỚI: Bắt link rút gọn dạng /share/xxxx/ của Mobile
-        const shareMatch = urlString.match(/\/share\/([a-zA-Z0-9_-]+)/);
-        if (shareMatch) {
-            return shareMatch[1]; // Trả về mã băm (ví dụ: 14g9bbx18Hh) làm ID
-        }
+function normalizeFacebookHost(hostname) {
+    return hostname.replace(/^www\./, '').replace(/^m\./, '');
+}
 
-        // 3. Trường hợp truyền thống 1: id=1000xxx
-        const idMatch = urlString.match(/id=(\d+)/);
-        if (idMatch) return idMatch[1];
+function isFacebookHost(hostname) {
+    const normalizedHost = normalizeFacebookHost(hostname);
+    return normalizedHost === 'facebook.com' || normalizedHost === 'fb.com';
+}
 
-        // 4. Trường hợp truyền thống 2: Username (facebook.com/zuck)
-        const usernameMatch = urlString.match(/(?:https?:\/\/)?(?:www\.|m\.)?facebook\.com\/([a-zA-Z0-9.]+)/);
-        
-        if (usernameMatch) {
-            let username = usernameMatch[1].replace(/\/$/, ""); 
-            
-            // Đã loại chữ 'share' ra khỏi danh sách đen vì đã xử lý ở trên
-            const invalidPaths = ['profile.php', 'groups', 'pages', 'events', 'watch', 'story.php'];
-            if (!invalidPaths.includes(username)) {
-                return username;
-            }
-        }
-        
-        // 5. Cứu cánh: tham số fbid
-        if (cleanUrl.searchParams.has('fbid')) {
-            return cleanUrl.searchParams.get('fbid');
-        }
+function stableHash(input) {
+    return crypto.createHash('sha1').update(input).digest('hex').slice(0, 16);
+}
 
+function extractUrlCandidates(text) {
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    return text.match(urlRegex) || [];
+}
+
+function normalizeFacebookUrl(rawUrl) {
+    const cleanUrl = new URL(rawUrl);
+
+    if (!isFacebookHost(cleanUrl.hostname)) {
         return null;
+    }
+
+    cleanUrl.hostname = normalizeFacebookHost(cleanUrl.hostname);
+
+    const removableParams = [
+        'mibextid',
+        'eav',
+        'paipv',
+        'rdid',
+        'share_url',
+        'fbclid',
+        'ref',
+        'refsrc',
+        'locale',
+        'tracking',
+        '__cft__',
+        '__tn__',
+        '__xts__',
+    ];
+
+    removableParams.forEach(param => cleanUrl.searchParams.delete(param));
+    cleanUrl.pathname = cleanUrl.pathname.replace(/\/+$/, '') || '/';
+
+    return cleanUrl;
+}
+
+function buildFacebookIdentity(cleanUrl, rawUrl) {
+    const canonicalUrl = cleanUrl.toString();
+    const pathname = cleanUrl.pathname;
+    const idParam = cleanUrl.searchParams.get('id');
+    const fbidParam = cleanUrl.searchParams.get('fbid');
+
+    if (pathname === '/profile.php' && idParam) {
+        return {
+            guestId: `profile:id:${idParam}`,
+            canonicalUrl,
+            rawUrl,
+            sourceType: 'profile-id',
+        };
+    }
+
+    if (pathname === '/profile.php' && fbidParam) {
+        return {
+            guestId: `profile:fbid:${fbidParam}`,
+            canonicalUrl,
+            rawUrl,
+            sourceType: 'profile-fbid',
+        };
+    }
+
+    const shareMatch = pathname.match(/^\/share\/([a-zA-Z0-9_-]+)$/);
+    if (shareMatch) {
+        return {
+            guestId: `share:${stableHash(canonicalUrl)}`,
+            canonicalUrl,
+            rawUrl,
+            sourceType: 'share',
+        };
+    }
+
+    const usernameMatch = pathname.match(/^\/([a-zA-Z0-9.]+)$/);
+    if (usernameMatch) {
+        const username = usernameMatch[1].replace(/\/$/, '').toLowerCase();
+        const invalidPaths = new Set(['profile.php', 'groups', 'pages', 'events', 'watch', 'story.php']);
+
+        if (!invalidPaths.has(username)) {
+            return {
+                guestId: `profile:username:${username}`,
+                canonicalUrl: `${cleanUrl.origin}/${username}`,
+                rawUrl,
+                sourceType: 'profile-username',
+            };
+        }
+    }
+
+    return null;
+}
+
+function parseFacebookUrl(rawUrl) {
+    try {
+        const cleanUrl = normalizeFacebookUrl(rawUrl);
+        if (!cleanUrl) {
+            return null;
+        }
+
+        return buildFacebookIdentity(cleanUrl, rawUrl);
     } catch (error) {
         return null;
     }
 }
 
-module.exports = { extractFacebookID };
+function extractFacebookLinks(text) {
+    if (!text || typeof text !== 'string') {
+        return [];
+    }
+
+    const matches = extractUrlCandidates(text);
+    const results = [];
+    const seen = new Set();
+
+    for (const rawUrl of matches) {
+        const parsed = parseFacebookUrl(rawUrl);
+        if (!parsed || seen.has(parsed.guestId)) {
+            continue;
+        }
+
+        seen.add(parsed.guestId);
+        results.push(parsed);
+    }
+
+    return results;
+}
+
+function extractFacebookID(text) {
+    const links = extractFacebookLinks(text);
+    return links.length > 0 ? links[0].guestId : null;
+}
+
+module.exports = { extractFacebookID, extractFacebookLinks, parseFacebookUrl };
