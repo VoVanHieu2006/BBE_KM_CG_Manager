@@ -52,7 +52,7 @@ app.post('/webhook', (req, res) => {
                 // TẦNG 2: XỬ LÝ KHI THÀNH VIÊN BẤM NÚT LỰA CHỌN
                 if (webhook_event.message && webhook_event.message.quick_reply) {
                     let payload = webhook_event.message.quick_reply.payload;
-                    handleQuickReply(sender_psid, payload, memberName);
+                    handleQuickReply(sender_psid, payload, memberName).catch(error => console.error(error));
                     return;
                 }
 
@@ -103,12 +103,12 @@ async function handleMessage(sender_psid, parsedLink, memberName) {
 }
 
 function collectIncomingLinks(message) {
-    const collectedLinks = [];
+    const collectedRawUrls = [];
 
     if (message.text) {
         const textLinks = extractUrlCandidates(message.text);
         textLinks.forEach(rawUrl => {
-            collectedLinks.push({ rawUrl, source: 'text' });
+            collectedRawUrls.push({ rawUrl, source: 'text' });
         });
     }
 
@@ -119,11 +119,30 @@ function collectIncomingLinks(message) {
                 return;
             }
 
-            collectedLinks.push({ rawUrl: candidateUrl, source: attachment.type || 'attachment' });
+            collectedRawUrls.push({ rawUrl: candidateUrl, source: attachment.type || 'attachment' });
         });
     }
 
-    return collectedLinks;
+    const parsedLinks = collectedRawUrls
+        .map(item => parseFacebookUrl(item.rawUrl))
+        .filter(Boolean);
+
+    const nonShareLinks = parsedLinks.filter(link => link.sourceType !== 'share');
+    const shareLinks = parsedLinks.filter(link => link.sourceType === 'share');
+
+    const preferredLinks = (parsedLinks.length === 2 && nonShareLinks.length === 1 && shareLinks.length === 1)
+        ? nonShareLinks
+        : parsedLinks;
+
+    const seenGuestIds = new Set();
+    return preferredLinks.filter(link => {
+        if (seenGuestIds.has(link.guestId)) {
+            return false;
+        }
+
+        seenGuestIds.add(link.guestId);
+        return true;
+    });
 }
 
 function wasMessageProcessed(messageId) {
@@ -161,8 +180,8 @@ function storePendingBatch(sender_psid, links) {
     const batchId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
     pendingBatches.set(batchId, {
         sender_psid,
-        links,
-        showHistoryShortcut: links.length > BATCH_HISTORY_BUTTON_THRESHOLD,
+        items: links,
+        showHistoryShortcut: links.length >= BATCH_HISTORY_BUTTON_THRESHOLD,
         createdAt: Date.now(),
     });
 
@@ -187,6 +206,10 @@ async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
 
     const summaryLines = formatBatchAnalysis(analysis.items, BATCH_DETAIL_PREVIEW_LIMIT);
     const hasManyLinks = analysis.items.length > BATCH_DETAIL_PREVIEW_LIMIT;
+    const shouldShowHistoryShortcut = analysis.items.length >= BATCH_HISTORY_BUTTON_THRESHOLD;
+    if (batch) {
+        batch.showHistoryShortcut = shouldShowHistoryShortcut;
+    }
     let response = {
         "text": hasManyLinks
             ? `📦 Đã phân tích ${analysis.items.length} link.\n- Hợp lệ: ${analysis.summary.validCount}\n- Không hợp lệ: ${analysis.summary.invalidCount}\n- Trùng trong list: ${analysis.summary.duplicateCount}\n\nBấm "Xem lịch sử mời" nếu muốn xem chi tiết từng link.`
@@ -197,6 +220,10 @@ async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
             { "content_type": "text", "title": `⏭️ Bỏ qua (${analysis.items.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('BO_QUA')}|${batchId}` }
         ]
     };
+
+    if (shouldShowHistoryShortcut) {
+        response.quick_replies.splice(2, 0, { "content_type": "text", "title": "📜 Xem lịch sử mời", "payload": `BATCH_ROLE|${encodeURIComponent('VIEW_HISTORY')}|${batchId}` });
+    }
 
     callSendAPI(sender_psid, response);
 }
@@ -369,6 +396,18 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         if (roleName === 'BO_QUA') {
             pendingBatches.delete(batchId);
             callSendAPI(sender_psid, { "text": "⏭️ Đã bỏ qua list này. Dữ liệu giữ nguyên trạng thái cũ." });
+            return;
+        }
+
+        if (roleName === 'VIEW_HISTORY') {
+            callSendAPI(sender_psid, {
+                "text": `${formatBatchAnalysis(batch.items, 50)}\n\nChọn cách xử lý tiếp theo cho list này:`,
+                "quick_replies": [
+                    { "content_type": "text", "title": "👤 Khách Mời", "payload": `BATCH_ROLE|${encodeURIComponent('Khách mời')}|${batchId}` },
+                    { "content_type": "text", "title": "🎓 Chuyên Gia", "payload": `BATCH_ROLE|${encodeURIComponent('Chuyên gia')}|${batchId}` },
+                    { "content_type": "text", "title": "⏩ Bỏ qua", "payload": `BATCH_ROLE|${encodeURIComponent('BO_QUA')}|${batchId}` }
+                ]
+            });
             return;
         }
 

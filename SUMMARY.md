@@ -33,6 +33,7 @@ This bot now has three main improvements:
 - Legacy action payloads are still supported.
 - The role-selection step now also has a `skip` option.
 - Large batch flows can expose a `Xem lịch sử mời` shortcut before the final action choices.
+- Share-preview messages are de-duplicated so a single pasted Facebook share link does not get counted twice.
 
 ## Files updated
 
