@@ -63,6 +63,51 @@ async function findGuestRowAcrossRoles(guestId) {
     return null;
 }
 
+async function loadGuestLookupAcrossRoles() {
+    const doc = await initSheet();
+    const sheetTitles = Object.values(ROLE_SHEETS);
+    const lookup = new Map();
+
+    for (const sheetTitle of sheetTitles) {
+        const sheet = doc.sheetsByTitle[sheetTitle];
+        if (!sheet) {
+            continue;
+        }
+
+        const rows = await sheet.getRows();
+        for (const row of rows) {
+            const guestId = row.get('ID_Khach');
+            if (!guestId || lookup.has(guestId)) {
+                continue;
+            }
+
+            lookup.set(guestId, {
+                row,
+                sheetTitle,
+            });
+        }
+    }
+
+    return lookup;
+}
+
+async function loadRoleRows(role) {
+    const sheet = await getOrCreateRoleSheet(role);
+    const rows = await sheet.getRows();
+    const lookup = new Map();
+
+    for (const row of rows) {
+        const guestId = row.get('ID_Khach');
+        if (!guestId) {
+            continue;
+        }
+
+        lookup.set(guestId, row);
+    }
+
+    return { sheet, rows, lookup };
+}
+
 // Khởi tạo hoặc cập nhật phân loại (Khách mời/Chuyên gia)
 async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
     const sheet = await getOrCreateRoleSheet(role);
@@ -116,4 +161,4 @@ async function markAsDoNotInvite(guestId, role) {
     }
 }
 
-module.exports = { getGuestRow, findGuestRowAcrossRoles, saveOrUpdateRole, incrementInviteCount, markAsDoNotInvite, resolveSheetTitle };
+module.exports = { getGuestRow, findGuestRowAcrossRoles, loadGuestLookupAcrossRoles, loadRoleRows, saveOrUpdateRole, incrementInviteCount, markAsDoNotInvite, resolveSheetTitle };

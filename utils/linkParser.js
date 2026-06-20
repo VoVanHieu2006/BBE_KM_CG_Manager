@@ -141,4 +141,40 @@ function extractFacebookID(text) {
     return links.length > 0 ? links[0].guestId : null;
 }
 
-module.exports = { extractFacebookID, extractFacebookLinks, parseFacebookUrl };
+function analyzeFacebookUrl(rawUrl) {
+    try {
+        const cleanUrl = normalizeFacebookUrl(rawUrl);
+        if (!cleanUrl) {
+            return {
+                valid: false,
+                rawUrl,
+                reason: 'non-facebook',
+            };
+        }
+
+        const identity = buildFacebookIdentity(cleanUrl, rawUrl);
+        if (!identity) {
+            return {
+                valid: false,
+                rawUrl,
+                reason: 'unrecognized-facebook-link',
+            };
+        }
+
+        return {
+            valid: true,
+            rawUrl,
+            guestId: identity.guestId,
+            canonicalUrl: identity.canonicalUrl,
+            sourceType: identity.sourceType,
+        };
+    } catch (error) {
+        return {
+            valid: false,
+            rawUrl,
+            reason: 'invalid-url',
+        };
+    }
+}
+
+module.exports = { extractFacebookID, extractFacebookLinks, parseFacebookUrl, extractUrlCandidates, analyzeFacebookUrl };
