@@ -14,8 +14,16 @@ const BATCH_TTL_MS = 15 * 60 * 1000;
 const BATCH_DETAIL_PREVIEW_LIMIT = 7;
 const BATCH_HISTORY_BUTTON_THRESHOLD = 8;
 
+// Hằng số mới cho giới hạn
+const MAX_MESSAGE_LENGTH = 600; // Facebook API giới hạn ~640 chars
+const API_DELAY_MS = 200; // Delay giữa các API calls
+const GUEST_LOOKUP_TTL_MS = 5 * 60 * 1000; // Cache 5 phút
+
 const processedMessageIds = new Map();
 const pendingBatches = new Map();
+
+// Cache cho guest lookup
+const cachedGuestLookup = { data: null, timestamp: 0 };
 
 app.get('/ping', (req, res) => {
     res.status(200).send('Server is awake!');
@@ -195,14 +203,35 @@ function storePendingBatch(sender_psid, links) {
     return batchId;
 }
 
+// Cache lookup guests - tối ưu tìm kiếm
+async function getCachedGuestLookup() {
+    const now = Date.now();
+    if (cachedGuestLookup.data && now - cachedGuestLookup.timestamp < GUEST_LOOKUP_TTL_MS) {
+        return cachedGuestLookup.data;
+    }
+
+    cachedGuestLookup.data = await loadGuestLookupAcrossRoles();
+    cachedGuestLookup.timestamp = now;
+    return cachedGuestLookup.data;
+}
+
 async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
-    const analysis = await buildBatchAnalysis(incomingLinks);
+    const validLinks = incomingLinks.filter(link => link);
+
+    // CẢNH BÁO KHI QUÁ NHIỀU LINK
+    if (validLinks.length > 30) {
+            callSendAPI(sender_psid, {
+            "text": `⚠️ Danh sách quá lớn (${validLinks.length} link). Facebook API có thể không xử lý hết. Bạn nên chia thành nhiều batch nhỏ hơn (15-20 link/batch) để đảm bảo ổn định.`
+        });
+    }
+
+    const analysis = await buildBatchAnalysis(validLinks);
     const batchId = storePendingBatch(sender_psid, analysis.items);
-    const batch = pendingBatches.get(batchId);
+        const batch = pendingBatches.get(batchId);
 
     if (batch) {
         batch.summary = analysis.summary;
-    }
+        }
 
     const summaryLines = formatBatchAnalysis(analysis.items, BATCH_DETAIL_PREVIEW_LIMIT);
     const hasManyLinks = analysis.items.length > BATCH_DETAIL_PREVIEW_LIMIT;
@@ -210,20 +239,21 @@ async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
     if (batch) {
         batch.showHistoryShortcut = shouldShowHistoryShortcut;
     }
+
     let response = {
         "text": hasManyLinks
             ? `📦 Đã phân tích ${analysis.items.length} link.\n- Hợp lệ: ${analysis.summary.validCount}\n- Không hợp lệ: ${analysis.summary.invalidCount}\n- Trùng trong list: ${analysis.summary.duplicateCount}\n\nBấm "Xem lịch sử mời" nếu muốn xem chi tiết từng link.`
             : `📦 Đã phân tích ${analysis.items.length} link.\n${summaryLines}\n\nChọn phân loại áp dụng cho toàn bộ danh sách:`,
-        "quick_replies": [
+                "quick_replies": [
             { "content_type": "text", "title": `👤 Khách Mời (${analysis.items.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('Khách mời')}|${batchId}` },
             { "content_type": "text", "title": `🎓 Chuyên Gia (${analysis.items.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('Chuyên gia')}|${batchId}` },
             { "content_type": "text", "title": `⏭️ Bỏ qua (${analysis.items.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('BO_QUA')}|${batchId}` }
-        ]
+                ]
     };
 
     if (shouldShowHistoryShortcut) {
         response.quick_replies.splice(2, 0, { "content_type": "text", "title": "📜 Xem lịch sử mời", "payload": `BATCH_ROLE|${encodeURIComponent('VIEW_HISTORY')}|${batchId}` });
-    }
+        }
 
     callSendAPI(sender_psid, response);
 }
@@ -232,7 +262,7 @@ async function buildBatchAnalysis(incomingLinks) {
     const items = [];
     const summary = { validCount: 0, invalidCount: 0, duplicateCount: 0 };
     const seenGuestIds = new Set();
-    const existingLookup = await loadGuestLookupAcrossRoles();
+    const existingLookup = await getCachedGuestLookup(); // Dùng cache
 
     for (const link of incomingLinks) {
         const analyzed = analyzeFacebookUrl(link.rawUrl);
@@ -246,8 +276,8 @@ async function buildBatchAnalysis(incomingLinks) {
                 inviteCount: 0,
                 status: 'Không hợp lệ',
             });
-            continue;
-        }
+                    continue;
+                }
 
         if (seenGuestIds.has(analyzed.guestId)) {
             summary.duplicateCount += 1;
@@ -285,6 +315,7 @@ async function buildBatchAnalysis(incomingLinks) {
     return { items, summary };
 }
 
+// Format batch analysis với giới hạn ký tự
 function formatBatchAnalysis(items, limit) {
     const lines = [];
     const slice = items.slice(0, limit);
@@ -351,7 +382,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         try {
             // Lưu phân loại xuống sheet và lấy số lần mời hiện tại
             const result = await saveOrUpdateRole(guestId, url, memberName, roleName);
-            
+
             // Gửi tiếp Tầng nút bấm thứ 2: Hỏi hành động xử lý tiếp theo
             let response = {
                 "text": `📊 Hệ thống ghi nhận: ${roleName}.\n👉 Người này đã được mời: ${result.inviteCount} lần.\n\nBạn muốn làm gì tiếp theo?`,
@@ -363,25 +394,25 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             };
             callSendAPI(sender_psid, response);
         } catch (e) { console.error(e); }
-    } 
-    
+    }
+
     else if (type === 'ACTION') {
         const actionName = parts[1];
         const hasNewPayloadShape = parts.length >= 4;
         const roleName = hasNewPayloadShape ? decodeURIComponent(parts[2] || 'Khách mời') : 'Khách mời';
         const guestId = hasNewPayloadShape ? decodeURIComponent(parts[3] || '') : decodeURIComponent(parts[2] || '');
         try {
-            if (actionName === 'MOI') {
+                if (actionName === 'MOI') {
                 const newCount = await incrementInviteCount(guestId, roleName);
                 callSendAPI(sender_psid, { "text": `✅ Đã ghi nhận 1 lượt tiếp cận! Tổng số lần mời hiện tại: ${newCount} lần.` });
-            } else if (actionName === 'KHONG_MOI') {
+                } else if (actionName === 'KHONG_MOI') {
                 await markAsDoNotInvite(guestId, roleName);
                 callSendAPI(sender_psid, { "text": "🚫 Đã chuyển trạng thái thành [Không mời lại]. Hệ thống sẽ phát cảnh báo đỏ nếu có ai gửi lại link này." });
             } else if (actionName === 'BO_QUA') {
                 callSendAPI(sender_psid, { "text": "⏩ Đã hủy thao tác. Dữ liệu giữ nguyên trạng thái cũ." });
-            }
+                }
         } catch (e) { console.error(e); }
-    } 
+            }
 
     else if (type === 'BATCH_ROLE') {
         const roleName = decodeURIComponent(parts[1] || 'Khách mời');
@@ -400,16 +431,18 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         }
 
         if (roleName === 'VIEW_HISTORY') {
-            callSendAPI(sender_psid, {
-                "text": `${formatBatchAnalysis(batch.items, 50)}\n\nChọn cách xử lý tiếp theo cho list này:`,
+            // Xử lý xem lịch sử với giới hạn ký tự
+            const detailText = formatBatchAnalysis(batch.items, 30); // Giới hạn 30 thay vì 50
+        callSendAPI(sender_psid, {
+                "text": `${detailText}\n\nChọn cách xử lý tiếp theo cho list này:`,
                 "quick_replies": [
                     { "content_type": "text", "title": "👤 Khách Mời", "payload": `BATCH_ROLE|${encodeURIComponent('Khách mời')}|${batchId}` },
                     { "content_type": "text", "title": "🎓 Chuyên Gia", "payload": `BATCH_ROLE|${encodeURIComponent('Chuyên gia')}|${batchId}` },
                     { "content_type": "text", "title": "⏩ Bỏ qua", "payload": `BATCH_ROLE|${encodeURIComponent('BO_QUA')}|${batchId}` }
                 ]
-            });
+        });
             return;
-        }
+    }
 
         batch.selectedRole = roleName;
 
@@ -420,7 +453,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
 
         if (batch.showHistoryShortcut) {
             actionReplies.push({ "content_type": "text", "title": "📜 Xem lịch sử mời", "payload": `BATCH_ACTION|VIEW_HISTORY|${encodeURIComponent(roleName)}|${batchId}` });
-        }
+}
 
         actionReplies.push({ "content_type": "text", "title": "⏩ Bỏ qua", "payload": `BATCH_ACTION|BO_QUA|${encodeURIComponent(roleName)}|${batchId}` });
 
@@ -428,7 +461,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             "text": `📊 Hệ thống ghi nhận list này là [${roleName}].\n👉 Danh sách có ${batch.items.length} link.\n\nBạn muốn làm gì tiếp theo?`,
             "quick_replies": actionReplies
         });
-    }
+}
 
     else if (type === 'BATCH_ACTION') {
         const actionName = parts[1];
@@ -437,12 +470,12 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         const batch = pendingBatches.get(batchId);
 
         if (!batch || batch.sender_psid !== sender_psid) {
-            callSendAPI(sender_psid, { "text": "⚠️ Danh sách link tạm đã hết hạn hoặc không hợp lệ. Vui lòng gửi lại list." });
+            callSendAPI(sender_psid, { "text": "⚠️ Danh sách link tạm đã hết hạn hoặc không hợp lệ. Vui lllllà gửi lại list." });
             return;
         }
 
         if (actionName === 'VIEW_HISTORY') {
-            const detailText = formatBatchAnalysis(batch.items, 50);
+            const detailText = formatBatchAnalysis(batch.items, 30); // Giới hạn 30
             callSendAPI(sender_psid, {
                 "text": `${detailText}\n\nChọn cách xử lý tiếp theo cho list [${roleName}]:`,
                 "quick_replies": [
@@ -463,7 +496,9 @@ async function handleQuickReply(sender_psid, payload, memberName) {
 
         const results = { created: 0, updated: 0, invited: 0, doNotInvite: 0, failed: 0 };
 
-        for (const link of batch.items) {
+        // Xử lý batch với delay để tránh rate limit
+        for (let i = 0; i < batch.items.length; i++) {
+            const link = batch.items[i];
             try {
                 if (!link.valid) {
                     continue;
@@ -489,6 +524,11 @@ async function handleQuickReply(sender_psid, payload, memberName) {
                 results.failed += 1;
                 console.error(error);
             }
+
+            // Delay giữa các hành động để tránh rate limit
+            if (i < batch.items.length - 1) {
+                await sleep(API_DELAY_MS);
+        }
         }
 
         callSendAPI(sender_psid, {
@@ -499,10 +539,57 @@ async function handleQuickReply(sender_psid, payload, memberName) {
     }
 }
 
-function callSendAPI(sender_psid, response) {
+// Hàm delay
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Gửi tin nhắn có giới hạn - chia nhỏ nếu quá dài
+async function callSendAPI(sender_psid, response) {
+    const text = response.text || '';
+
+    if (text.length > MAX_MESSAGE_LENGTH) {
+        // Chia thành nhiều tin nhắn
+        const chunks = splitMessageIntoChunks(text, MAX_MESSAGE_LENGTH);
+        for (let i = 0; i < chunks.length; i++) {
+            const chunkMsg = { ...response, text: chunks[i] };
+            if (i < chunks.length - 1) {
+                delete chunkMsg.quick_replies; // Chỉ giữ quick_replies ở tin cuối
+            }
+            await sendSingleMessage(sender_psid, chunkMsg);
+        }
+    } else {
+        await sendSingleMessage(sender_psid, response);
+    }
+}
+
+function splitMessageIntoChunks(text, maxLength) {
+    const chunks = [];
+    let remaining = text;
+
+    while (remaining.length > maxLength) {
+        let splitAt = remaining.lastIndexOf('\n', maxLength);
+        if (splitAt === -1 || splitAt < maxLength * 0.8) {
+            splitAt = maxLength;
+        }
+        chunks.push(remaining.substring(0, splitAt));
+        remaining = remaining.substring(splitAt).trim();
+    }
+
+    if (remaining.length > 0) {
+        chunks.push(remaining);
+    }
+
+    return chunks;
+}
+
+async function sendSingleMessage(sender_psid, response) {
     let request_body = { "recipient": { "id": sender_psid }, "message": response };
-    axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, request_body)
-        .catch(err => console.error('Lỗi API Facebook:', err.response ? err.response.data : err.message));
+    try {
+        await axios.post(`https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, request_body);
+    } catch (err) {
+        console.error('Lỗi API Facebook:', err.response ? err.response.data : err.message);
+    }
 }
 
 const PORT = process.env.PORT || 3000;
