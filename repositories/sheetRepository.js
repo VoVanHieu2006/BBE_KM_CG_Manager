@@ -1,5 +1,6 @@
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
+const { google } = require('googleapis');
 
 const ROLE_SHEETS = {
     'Khách mời': 'KhachMoi',
@@ -139,6 +140,82 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
     }
 }
 
+/**
+ * Batch version of saveOrUpdateRole – dùng cho việc xử lý danh sách lớn.
+ * Trả về thống kê {created, updated}
+ */
+async function batchSaveOrUpdate(links, role, memberName) {
+    // links: [{guestId, originalLink}]
+    const sheet = await getOrCreateRoleSheet(role);
+    const existingLookup = await loadGuestLookupAcrossRoles(); // Map<guestId, {row, sheetTitle}>
+
+    const rowsToAdd = [];
+    const rowsToUpdate = []; // {rowIndex, values}
+
+    // Google Sheets API works with 0‑based row index within the sheet (excluding header)
+    const headerRowCount = 1; // first row is header
+
+    for (const { guestId, originalLink } of links) {
+        const existing = existingLookup.get(guestId);
+        if (existing && existing.sheetTitle === resolveSheetTitle(role)) {
+            // Prepare update – we need the row index of the existing row
+            const rowIndex = existing.row.rowIndex - headerRowCount; // rowIndex for API (0‑based after header)
+            rowsToUpdate.push({
+                rowIndex,
+                values: [guestId, originalLink, memberName, 'Đang khởi tạo', role, '0'],
+            });
+        } else {
+            rowsToAdd.push([guestId, originalLink, memberName, 'Đang khởi tạo', role, '0']);
+        }
+    }
+
+    // Prepare Google Sheets batchUpdate request
+    const auth = new google.auth.JWT({
+        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    const requests = [];
+
+    if (rowsToAdd.length) {
+        // Append rows at the end of the sheet
+        requests.push({
+            appendCells: {
+                sheetId: sheet.sheetId,
+                rows: rowsToAdd.map(row => ({
+                    values: row.map(v => ({ userEnteredValue: { stringValue: v } })),
+                })),
+                fields: '*',
+            },
+        });
+    }
+
+    rowsToUpdate.forEach(u => {
+        requests.push({
+            updateCells: {
+                start: { sheetId: sheet.sheetId, rowIndex: u.rowIndex, columnIndex: 0 },
+                rows: [{
+                    values: u.values.map(v => ({ userEnteredValue: { stringValue: v } })),
+                }],
+                fields: '*',
+            },
+        });
+    });
+
+    if (requests.length === 0) {
+        return { created: 0, updated: 0 };
+    }
+
+    const sheets = google.sheets({ version: 'v4', auth });
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: process.env.SHEET_ID,
+        requestBody: { requests },
+    });
+
+    return { created: rowsToAdd.length, updated: rowsToUpdate.length };
+}
+
 // Hành động: Mời (Cộng dồn số lần)
 async function incrementInviteCount(guestId, role) {
     const row = await getGuestRow(guestId, role);
@@ -161,4 +238,4 @@ async function markAsDoNotInvite(guestId, role) {
     }
 }
 
-module.exports = { getGuestRow, findGuestRowAcrossRoles, loadGuestLookupAcrossRoles, loadRoleRows, saveOrUpdateRole, incrementInviteCount, markAsDoNotInvite, resolveSheetTitle };
+module.exports = { getGuestRow, findGuestRowAcrossRoles, loadGuestLookupAcrossRoles, loadRoleRows, saveOrUpdateRole, incrementInviteCount, markAsDoNotInvite, resolveSheetTitle, batchSaveOrUpdate };
