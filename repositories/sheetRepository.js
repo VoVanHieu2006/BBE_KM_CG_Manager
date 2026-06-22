@@ -238,4 +238,51 @@ async function markAsDoNotInvite(guestId, role) {
     }
 }
 
-module.exports = { getGuestRow, findGuestRowAcrossRoles, loadGuestLookupAcrossRoles, loadRoleRows, saveOrUpdateRole, incrementInviteCount, markAsDoNotInvite, resolveSheetTitle, batchSaveOrUpdate };
+async function batchMarkDoNotInvite(guestIds, role) {
+    if (!Array.isArray(guestIds) || guestIds.length === 0) return { updated: 0 };
+    const sheet = await getOrCreateRoleSheet(role);
+    const rows = await sheet.getRows();
+    const requests = [];
+    let updated = 0;
+    for (const row of rows) {
+        const id = row.get('ID_Khach');
+        if (guestIds.includes(id)) {
+            const rowIndex = row.rowIndex - 1; // after header
+            requests.push({
+                updateCells: {
+                    start: { sheetId: sheet.sheetId, rowIndex, columnIndex: 3 }, // column 3 = Trang_Thai
+                    rows: [{ values: [{ userEnteredValue: { stringValue: 'Không mời lại' } }] }],
+                    fields: 'userEnteredValue'
+                }
+            });
+            updated++;
+        }
+    }
+    if (requests.length === 0) return { updated: 0 };
+    const { google } = require('googleapis');
+    const auth = new google.auth.JWT({
+        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    const sheets = google.sheets({ version: 'v4', auth });
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: process.env.SHEET_ID,
+        requestBody: { requests },
+    });
+    return { updated };
+}
+
+module.exports = {
+    getGuestRow,
+    findGuestRowAcrossRoles,
+    loadGuestLookupAcrossRoles,
+    loadRoleRows,
+    saveOrUpdateRole,
+    incrementInviteCount,
+    markAsDoNotInvite,
+    resolveSheetTitle,
+    batchSaveOrUpdate,
+    batchMarkDoNotInvite,
+};
+
