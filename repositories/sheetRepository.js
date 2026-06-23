@@ -273,6 +273,101 @@ async function batchMarkDoNotInvite(guestIds, role) {
     return { updated };
 }
 
+// ... (Giữ nguyên các hàm cũ ở trên) ...
+
+/**
+ * Xử lý hàng loạt (Batch) cho hành động Mời / Không mời lại
+ * Tối ưu hóa bằng Google Sheets batchUpdate để tránh Rate Limit và Timeout
+ */
+async function batchProcessActions(links, role, memberName, actionName) {
+    const { sheet, lookup } = await loadRoleRows(role);
+
+    const rowsToAdd = [];
+    const rowsToUpdate = []; 
+
+    const sheetId = sheet.sheetId;
+    const headerRowCount = 1;
+
+    for (const { guestId, originalLink } of links) {
+        const existing = lookup.get(guestId);
+        
+        let newInviteCount = '1';
+        let newStatus = 'Đang liên hệ';
+        
+        if (actionName === 'KHONG_MOI') {
+            newStatus = 'Không mời lại';
+            newInviteCount = '0'; 
+        }
+
+        if (existing) {
+            const currentCount = parseInt(existing.get('So_Lan_Moi') || 0);
+            
+            if (actionName === 'MOI') {
+                newInviteCount = (currentCount + 1).toString();
+                newStatus = 'Đang liên hệ';
+            } else if (actionName === 'KHONG_MOI') {
+                newInviteCount = currentCount.toString(); 
+                newStatus = 'Không mời lại';
+            }
+
+            const rowIndex = existing.rowIndex - headerRowCount;
+            rowsToUpdate.push({
+                rowIndex,
+                values: [guestId, originalLink, memberName, newStatus, role, newInviteCount],
+            });
+        } else {
+            if (actionName === 'KHONG_MOI') {
+                newInviteCount = '0';
+            }
+            rowsToAdd.push([guestId, originalLink, memberName, newStatus, role, newInviteCount]);
+        }
+    }
+
+    const auth = new google.auth.JWT({
+        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    const requests = [];
+
+    if (rowsToAdd.length) {
+        requests.push({
+            appendCells: {
+                sheetId: sheetId,
+                rows: rowsToAdd.map(row => ({
+                    values: row.map(v => ({ userEnteredValue: { stringValue: v } })),
+                })),
+                fields: '*',
+            },
+        });
+    }
+
+    rowsToUpdate.forEach(u => {
+        requests.push({
+            updateCells: {
+                start: { sheetId: sheetId, rowIndex: u.rowIndex, columnIndex: 0 },
+                rows: [{
+                    values: u.values.map(v => ({ userEnteredValue: { stringValue: v } })),
+                }],
+                fields: '*',
+            },
+        });
+    });
+
+    if (requests.length === 0) {
+        return { created: 0, updated: 0 };
+    }
+
+    const sheets = google.sheets({ version: 'v4', auth });
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: process.env.SHEET_ID,
+        requestBody: { requests },
+    });
+
+    return { created: rowsToAdd.length, updated: rowsToUpdate.length };
+}
+
 module.exports = {
     getGuestRow,
     findGuestRowAcrossRoles,
@@ -284,5 +379,6 @@ module.exports = {
     resolveSheetTitle,
     batchSaveOrUpdate,
     batchMarkDoNotInvite,
+    batchProcessActions, // Export thêm hàm mới
 };
 

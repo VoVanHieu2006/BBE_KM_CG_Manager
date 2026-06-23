@@ -470,12 +470,13 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         const batch = pendingBatches.get(batchId);
 
         if (!batch || batch.sender_psid !== sender_psid) {
-            callSendAPI(sender_psid, { "text": "⚠️ Danh sách link tạm đã hết hạn hoặc không hợp lệ. Vui lllllà gửi lại list." });
+            // Fix lỗi chính tả "Vui lllllà"
+            callSendAPI(sender_psid, { "text": "⚠️ Danh sách link tạm đã hết hạn hoặc không hợp lệ. Vui lòng gửi lại list." });
             return;
         }
 
         if (actionName === 'VIEW_HISTORY') {
-            const detailText = formatBatchAnalysis(batch.items, 30); // Giới hạn 30
+            const detailText = formatBatchAnalysis(batch.items, 30); 
             callSendAPI(sender_psid, {
                 "text": `${detailText}\n\nChọn cách xử lý tiếp theo cho list [${roleName}]:`,
                 "quick_replies": [
@@ -496,39 +497,27 @@ async function handleQuickReply(sender_psid, payload, memberName) {
 
         const results = { created: 0, updated: 0, invited: 0, doNotInvite: 0, failed: 0 };
 
-        // Xử lý batch với delay để tránh rate limit
-        for (let i = 0; i < batch.items.length; i++) {
-            const link = batch.items[i];
-            try {
-                if (!link.valid) {
-                    continue;
-                }
+        // Thay thế vòng lặp for bằng hàm tối ưu batchProcessActions
+        try {
+            const validLinks = batch.items.filter(item => item.valid).map(item => ({
+                guestId: item.guestId,
+                originalLink: item.canonicalUrl
+            }));
 
-                const saveResult = await saveOrUpdateRole(link.guestId, link.canonicalUrl, memberName, roleName);
-                if (saveResult.status === 'created') {
-                    results.created += 1;
-                } else if (saveResult.status === 'updated') {
-                    results.updated += 1;
-                }
-
+            if (validLinks.length > 0) {
+                const batchResult = await batchProcessActions(validLinks, roleName, memberName, actionName);
+                results.created = batchResult.created;
+                results.updated = batchResult.updated;
+                
                 if (actionName === 'MOI') {
-                    const newCount = await incrementInviteCount(link.guestId, roleName);
-                    if (newCount > 0) {
-                        results.invited += 1;
-                    }
+                    results.invited = validLinks.length;
                 } else if (actionName === 'KHONG_MOI') {
-                    await markAsDoNotInvite(link.guestId, roleName);
-                    results.doNotInvite += 1;
+                    results.doNotInvite = validLinks.length;
                 }
-            } catch (error) {
-                results.failed += 1;
-                console.error(error);
             }
-
-            // Delay giữa các hành động để tránh rate limit
-            if (i < batch.items.length - 1) {
-                await sleep(API_DELAY_MS);
-        }
+        } catch (error) {
+            results.failed = batch.items.filter(item => item.valid).length;
+            console.error('Lỗi khi xử lý batch:', error);
         }
 
         callSendAPI(sender_psid, {
