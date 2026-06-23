@@ -94,19 +94,41 @@ async function loadGuestLookupAcrossRoles() {
 
 async function loadRoleRows(role) {
     const sheet = await getOrCreateRoleSheet(role);
-    const rows = await sheet.getRows({ offset: 0 }); 
-    
+    const sheetTitle = resolveSheetTitle(role);
+
+    const auth = new google.auth.JWT({
+        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    // Đọc trực tiếp dải ô dữ liệu từ hàng 2 đến hàng 1000 để lấy data mới nhất 100%
+    const response = await sheets.spreadsheets.values.get({
+        spreadsheetId: process.env.SHEET_ID,
+        range: `${sheetTitle}!A2:F1000`, 
+    });
+
+    const rows = response.data.values || [];
     const lookup = new Map();
 
-    for (const row of rows) {
-        const guestId = row.get('ID_Khach');
-        if (!guestId) {
-            continue;
-        }
-        lookup.set(guestId, row);
-    }
+    // Map dữ liệu dựa trên mảng thuần túy (0: ID_Khach, 1: Link_Goc, 2: Nguoi_Moi, 3: Trang_Thai, 4: Phan_Loai, 5: So_Lan_Moi)
+    rows.forEach((row, index) => {
+        const guestId = row[0];
+        if (!guestId) return;
 
-    return { sheet, rows, lookup };
+        lookup.set(guestId, {
+            rowIndex: index + 2, // Chuyển về đúng số hàng thực tế trên Sheet (Hàng đầu tiên của data là hàng 2)
+            guestId: row[0],
+            originalLink: row[1],
+            nguoiMoi: row[2],
+            trangThai: row[3],
+            phanLoai: row[4],
+            soLanMoi: row[5] || '0'
+        });
+    });
+
+    return { sheet, lookup };
 }
 
 // Khởi tạo hoặc cập nhật phân loại (Khách mời/Chuyên gia)
@@ -280,24 +302,15 @@ async function batchMarkDoNotInvite(guestIds, role) {
  * Tối ưu hóa bằng Google Sheets batchUpdate để tránh Rate Limit và Timeout
  */
 async function batchProcessActions(links, role, memberName, actionName) {
-    // TỐI ƯU CỐT LÕI: Đọc song song cả lookup tổng để chống trùng và chống lag đồng bộ
-    const { sheet, lookup: roleLookup } = await loadRoleRows(role);
-    const crossLookup = await loadGuestLookupAcrossRoles(); 
+    // Gọi hàm load dữ liệu sạch không qua cache
+    const { sheet, lookup } = await loadRoleRows(role);
 
     const rowsToAdd = [];
     const requests = []; 
     const sheetId = sheet.sheetId;
 
     for (const { guestId, originalLink } of links) {
-        // Ưu tiên lấy từ roleLookup, nếu không có thì kiểm tra chéo ở crossLookup
-        let existing = roleLookup.get(guestId);
-        if (!existing && crossLookup.has(guestId)) {
-            const crossItem = crossLookup.get(guestId);
-            // Nếu khách đã nằm đúng sheet role này rồi thì lấy row đó luôn
-            if (crossItem.sheetTitle === resolveSheetTitle(role)) {
-                existing = crossItem.row;
-            }
-        }
+        const existing = lookup.get(guestId);
         
         let newInviteCount = '1';
         let newStatus = 'Đang liên hệ';
@@ -308,8 +321,8 @@ async function batchProcessActions(links, role, memberName, actionName) {
         }
 
         if (existing) {
-            // Ép kiểu an toàn tuyệt đối
-            let currentCount = parseInt(String(existing.get('So_Lan_Moi')).trim(), 10);
+            // Đọc trực tiếp từ object thuần, không sợ dính bộ nhớ đệm ẩn của thư viện
+            let currentCount = parseInt(String(existing.soLanMoi).trim(), 10);
             if (isNaN(currentCount)) {
                 currentCount = 0; 
             }
@@ -322,12 +335,13 @@ async function batchProcessActions(links, role, memberName, actionName) {
                 newStatus = 'Không mời lại';
             }
 
-            const rowIndex = parseInt(existing.rowIndex, 10) - 1;
-            if (isNaN(rowIndex) || rowIndex < 1) continue; // Bảo vệ hàng header
+            // existing.rowIndex lúc này đã là số hàng chuẩn 1-based (ví dụ: 2, 3, 4)
+            // Cần trừ đi 1 để biến thành 0-based index truyền vào API updateCells
+            const apiRowIndex = existing.rowIndex - 1;
 
             requests.push({
                 updateCells: {
-                    start: { sheetId: sheetId, rowIndex: rowIndex, columnIndex: 2 }, 
+                    start: { sheetId: sheetId, rowIndex: apiRowIndex, columnIndex: 2 }, 
                     rows: [{
                         values: [
                             { userEnteredValue: { stringValue: memberName } }, 
@@ -340,7 +354,6 @@ async function batchProcessActions(links, role, memberName, actionName) {
                 }
             });
         } else {
-            // Nếu thực sự chưa có thì mới thêm mới
             rowsToAdd.push([guestId, originalLink, memberName, newStatus, role, newInviteCount]);
         }
     }
