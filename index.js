@@ -2,7 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const { extractFacebookID, extractFacebookLinks, parseFacebookUrl, extractUrlCandidates, analyzeFacebookUrl } = require('./utils/linkParser');
-const { getGuestRow, findGuestRowAcrossRoles, loadGuestLookupAcrossRoles, saveOrUpdateRole, incrementInviteCount, markAsDoNotInvite } = require('./repositories/sheetRepository');
+// ĐÃ SỬA: Thêm batchProcessActions vào đây
+const { getGuestRow, findGuestRowAcrossRoles, loadGuestLookupAcrossRoles, saveOrUpdateRole, incrementInviteCount, markAsDoNotInvite, batchProcessActions } = require('./repositories/sheetRepository');
 
 const app = express();
 app.use(express.json());
@@ -14,15 +15,12 @@ const BATCH_TTL_MS = 15 * 60 * 1000;
 const BATCH_DETAIL_PREVIEW_LIMIT = 7;
 const BATCH_HISTORY_BUTTON_THRESHOLD = 8;
 
-// Hằng số mới cho giới hạn
-const MAX_MESSAGE_LENGTH = 600; // Facebook API giới hạn ~640 chars
-const API_DELAY_MS = 200; // Delay giữa các API calls
-const GUEST_LOOKUP_TTL_MS = 5 * 60 * 1000; // Cache 5 phút
+const MAX_MESSAGE_LENGTH = 600; 
+const GUEST_LOOKUP_TTL_MS = 5 * 60 * 1000; 
 
 const processedMessageIds = new Map();
 const pendingBatches = new Map();
 
-// Cache cho guest lookup
 const cachedGuestLookup = { data: null, timestamp: 0 };
 
 app.get('/ping', (req, res) => {
@@ -48,23 +46,17 @@ app.post('/webhook', (req, res) => {
                 const sender_psid = webhook_event.sender && webhook_event.sender.id;
                 const memberName = "Thành viên BBE";
 
-                if (!sender_psid) {
-                    return;
-                }
+                if (!sender_psid) return;
 
                 const messageId = webhook_event.message && webhook_event.message.mid;
-                if (messageId && wasMessageProcessed(messageId)) {
-                    return;
-                }
+                if (messageId && wasMessageProcessed(messageId)) return;
 
-                // TẦNG 2: XỬ LÝ KHI THÀNH VIÊN BẤM NÚT LỰA CHỌN
                 if (webhook_event.message && webhook_event.message.quick_reply) {
                     let payload = webhook_event.message.quick_reply.payload;
                     handleQuickReply(sender_psid, payload, memberName).catch(error => console.error(error));
                     return;
                 }
 
-                // TẦNG 1: XỬ LÝ KHI THÀNH VIÊN GỬI LINK HOẶC BẤM NÚT SHARE TỪ APP
                 if (webhook_event.message) {
                     const extractedLinks = collectIncomingLinks(webhook_event.message);
 
@@ -84,7 +76,6 @@ app.post('/webhook', (req, res) => {
     }
 });
 
-// --- HÀM XỬ LÝ LƯỢT 1: NHẬN LINK ---
 async function handleMessage(sender_psid, parsedLink, memberName) {
     const linkData = typeof parsedLink === 'string' ? parseFacebookUrl(parsedLink) : parsedLink;
     if (!linkData || !linkData.guestId) {
@@ -95,7 +86,6 @@ async function handleMessage(sender_psid, parsedLink, memberName) {
     try {
         const rowInfo = await findGuestRowAcrossRoles(linkData.guestId);
         
-        // KIỂM TRA CẢNH BÁO ĐỎ TRƯỚC TIÊN
         if (rowInfo && rowInfo.row.get('Trang_Thai') === 'Không mời lại') {
             callSendAPI(sender_psid, { 
                 "text": `⚠️ CẢNH BÁO ĐỎ: Người này đã bị đánh dấu [KHÔNG MỜI LẠI]! Vui lòng không tiếp cận.` 
@@ -103,7 +93,6 @@ async function handleMessage(sender_psid, parsedLink, memberName) {
             return;
         }
 
-        // Nếu bình thường, hiển thị lựa chọn phân loại dữ liệu ban đầu
         sendRoleSelection(sender_psid, linkData);
     } catch (error) {
         console.error(error);
@@ -123,10 +112,7 @@ function collectIncomingLinks(message) {
     if (Array.isArray(message.attachments)) {
         message.attachments.forEach(attachment => {
             const candidateUrl = attachment && attachment.payload && attachment.payload.url;
-            if (!candidateUrl) {
-                return;
-            }
-
+            if (!candidateUrl) return;
             collectedRawUrls.push({ rawUrl: candidateUrl, source: attachment.type || 'attachment' });
         });
     }
@@ -144,10 +130,7 @@ function collectIncomingLinks(message) {
 
     const seenGuestIds = new Set();
     return preferredLinks.filter(link => {
-        if (seenGuestIds.has(link.guestId)) {
-            return false;
-        }
-
+        if (seenGuestIds.has(link.guestId)) return false;
         seenGuestIds.add(link.guestId);
         return true;
     });
@@ -155,11 +138,7 @@ function collectIncomingLinks(message) {
 
 function wasMessageProcessed(messageId) {
     cleanupTimedStore(processedMessageIds, EVENT_TTL_MS);
-
-    if (processedMessageIds.has(messageId)) {
-        return true;
-    }
-
+    if (processedMessageIds.has(messageId)) return true;
     processedMessageIds.set(messageId, Date.now());
     return false;
 }
@@ -167,18 +146,14 @@ function wasMessageProcessed(messageId) {
 function cleanupTimedStore(store, ttlMs) {
     const cutoff = Date.now() - ttlMs;
     for (const [key, timestamp] of store.entries()) {
-        if (timestamp < cutoff) {
-            store.delete(key);
-        }
+        if (timestamp < cutoff) store.delete(key);
     }
 }
 
 function cleanupPendingBatches() {
     const cutoff = Date.now() - BATCH_TTL_MS;
     for (const [batchId, batch] of pendingBatches.entries()) {
-        if (batch.createdAt < cutoff) {
-            pendingBatches.delete(batchId);
-        }
+        if (batch.createdAt < cutoff) pendingBatches.delete(batchId);
     }
 }
 
@@ -193,23 +168,14 @@ function storePendingBatch(sender_psid, links) {
         createdAt: Date.now(),
     });
 
-    setTimeout(() => {
-        const batch = pendingBatches.get(batchId);
-        if (batch && Date.now() - batch.createdAt >= BATCH_TTL_MS) {
-            pendingBatches.delete(batchId);
-        }
-    }, BATCH_TTL_MS);
-
     return batchId;
 }
 
-// Cache lookup guests - tối ưu tìm kiếm
 async function getCachedGuestLookup() {
     const now = Date.now();
     if (cachedGuestLookup.data && now - cachedGuestLookup.timestamp < GUEST_LOOKUP_TTL_MS) {
         return cachedGuestLookup.data;
     }
-
     cachedGuestLookup.data = await loadGuestLookupAcrossRoles();
     cachedGuestLookup.timestamp = now;
     return cachedGuestLookup.data;
@@ -218,42 +184,38 @@ async function getCachedGuestLookup() {
 async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
     const validLinks = incomingLinks.filter(link => link);
 
-    // CẢNH BÁO KHI QUÁ NHIỀU LINK
     if (validLinks.length > 30) {
-            callSendAPI(sender_psid, {
-            "text": `⚠️ Danh sách quá lớn (${validLinks.length} link). Facebook API có thể không xử lý hết. Bạn nên chia thành nhiều batch nhỏ hơn (15-20 link/batch) để đảm bảo ổn định.`
+        callSendAPI(sender_psid, {
+            "text": `⚠️ Danh sách quá lớn (${validLinks.length} link). Hãy chia thành các list nhỏ tầm 15-20 link để bot xử lý mượt mà và an toàn nhất nhé.`
         });
     }
 
     const analysis = await buildBatchAnalysis(validLinks);
     const batchId = storePendingBatch(sender_psid, analysis.items);
-        const batch = pendingBatches.get(batchId);
+    const batch = pendingBatches.get(batchId);
 
-    if (batch) {
-        batch.summary = analysis.summary;
-        }
+    if (batch) batch.summary = analysis.summary;
 
     const summaryLines = formatBatchAnalysis(analysis.items, BATCH_DETAIL_PREVIEW_LIMIT);
     const hasManyLinks = analysis.items.length > BATCH_DETAIL_PREVIEW_LIMIT;
     const shouldShowHistoryShortcut = analysis.items.length >= BATCH_HISTORY_BUTTON_THRESHOLD;
-    if (batch) {
-        batch.showHistoryShortcut = shouldShowHistoryShortcut;
-    }
+    
+    if (batch) batch.showHistoryShortcut = shouldShowHistoryShortcut;
 
     let response = {
         "text": hasManyLinks
             ? `📦 Đã phân tích ${analysis.items.length} link.\n- Hợp lệ: ${analysis.summary.validCount}\n- Không hợp lệ: ${analysis.summary.invalidCount}\n- Trùng trong list: ${analysis.summary.duplicateCount}\n\nBấm "Xem lịch sử mời" nếu muốn xem chi tiết từng link.`
             : `📦 Đã phân tích ${analysis.items.length} link.\n${summaryLines}\n\nChọn phân loại áp dụng cho toàn bộ danh sách:`,
-                "quick_replies": [
+        "quick_replies": [
             { "content_type": "text", "title": `👤 Khách Mời (${analysis.items.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('Khách mời')}|${batchId}` },
             { "content_type": "text", "title": `🎓 Chuyên Gia (${analysis.items.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('Chuyên gia')}|${batchId}` },
             { "content_type": "text", "title": `⏭️ Bỏ qua (${analysis.items.length})`, "payload": `BATCH_ROLE|${encodeURIComponent('BO_QUA')}|${batchId}` }
-                ]
+        ]
     };
 
     if (shouldShowHistoryShortcut) {
         response.quick_replies.splice(2, 0, { "content_type": "text", "title": "📜 Xem lịch sử mời", "payload": `BATCH_ROLE|${encodeURIComponent('VIEW_HISTORY')}|${batchId}` });
-        }
+    }
 
     callSendAPI(sender_psid, response);
 }
@@ -262,7 +224,7 @@ async function buildBatchAnalysis(incomingLinks) {
     const items = [];
     const summary = { validCount: 0, invalidCount: 0, duplicateCount: 0 };
     const seenGuestIds = new Set();
-    const existingLookup = await getCachedGuestLookup(); // Dùng cache
+    const existingLookup = await getCachedGuestLookup();
 
     for (const link of incomingLinks) {
         const analyzed = analyzeFacebookUrl(link.rawUrl);
@@ -276,8 +238,8 @@ async function buildBatchAnalysis(incomingLinks) {
                 inviteCount: 0,
                 status: 'Không hợp lệ',
             });
-                    continue;
-                }
+            continue;
+        }
 
         if (seenGuestIds.has(analyzed.guestId)) {
             summary.duplicateCount += 1;
@@ -315,7 +277,6 @@ async function buildBatchAnalysis(incomingLinks) {
     return { items, summary };
 }
 
-// Format batch analysis với giới hạn ký tự
 function formatBatchAnalysis(items, limit) {
     const lines = [];
     const slice = items.slice(0, limit);
@@ -336,22 +297,12 @@ function formatBatchAnalysis(items, limit) {
 }
 
 function describeInvalidReason(reason) {
-    if (reason === 'non-facebook') {
-        return 'ngoài Facebook';
-    }
-
-    if (reason === 'duplicate-in-list') {
-        return 'trùng trong list';
-    }
-
-    if (reason === 'unrecognized-facebook-link') {
-        return 'không nhận diện được link';
-    }
-
+    if (reason === 'non-facebook') return 'ngoài Facebook';
+    if (reason === 'duplicate-in-list') return 'trùng trong list';
+    if (reason === 'unrecognized-facebook-link') return 'không nhận diện được link';
     return 'không hợp lệ';
 }
 
-// --- GỬI NÚT CHỌN PHÂN LOẠI (TẦNG 1) ---
 function sendRoleSelection(sender_psid, linkData) {
     let response = {
         "text": "🎯 Khách này hợp lệ. Vui lòng chọn phân loại:",
@@ -364,10 +315,9 @@ function sendRoleSelection(sender_psid, linkData) {
     callSendAPI(sender_psid, response);
 }
 
-// --- HÀM XỬ LÝ LƯỢT 2: KHI BẤM NÚT ---
 async function handleQuickReply(sender_psid, payload, memberName) {
     const parts = payload.split('|');
-    const type = parts[0]; // ROLE, ACTION, BATCH_ROLE hoặc BATCH_ACTION
+    const type = parts[0];
 
     if (type === 'ROLE') {
         const roleName = decodeURIComponent(parts[1] || 'Khách mời');
@@ -380,10 +330,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         }
 
         try {
-            // Lưu phân loại xuống sheet và lấy số lần mời hiện tại
             const result = await saveOrUpdateRole(guestId, url, memberName, roleName);
-
-            // Gửi tiếp Tầng nút bấm thứ 2: Hỏi hành động xử lý tiếp theo
             let response = {
                 "text": `📊 Hệ thống ghi nhận: ${roleName}.\n👉 Người này đã được mời: ${result.inviteCount} lần.\n\nBạn muốn làm gì tiếp theo?`,
                 "quick_replies": [
@@ -402,17 +349,17 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         const roleName = hasNewPayloadShape ? decodeURIComponent(parts[2] || 'Khách mời') : 'Khách mời';
         const guestId = hasNewPayloadShape ? decodeURIComponent(parts[3] || '') : decodeURIComponent(parts[2] || '');
         try {
-                if (actionName === 'MOI') {
+            if (actionName === 'MOI') {
                 const newCount = await incrementInviteCount(guestId, roleName);
                 callSendAPI(sender_psid, { "text": `✅ Đã ghi nhận 1 lượt tiếp cận! Tổng số lần mời hiện tại: ${newCount} lần.` });
-                } else if (actionName === 'KHONG_MOI') {
+            } else if (actionName === 'KHONG_MOI') {
                 await markAsDoNotInvite(guestId, roleName);
                 callSendAPI(sender_psid, { "text": "🚫 Đã chuyển trạng thái thành [Không mời lại]. Hệ thống sẽ phát cảnh báo đỏ nếu có ai gửi lại link này." });
             } else if (actionName === 'BO_QUA') {
                 callSendAPI(sender_psid, { "text": "⏩ Đã hủy thao tác. Dữ liệu giữ nguyên trạng thái cũ." });
-                }
-        } catch (e) { console.error(e); }
             }
+        } catch (e) { console.error(e); }
+    }
 
     else if (type === 'BATCH_ROLE') {
         const roleName = decodeURIComponent(parts[1] || 'Khách mời');
@@ -431,18 +378,17 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         }
 
         if (roleName === 'VIEW_HISTORY') {
-            // Xử lý xem lịch sử với giới hạn ký tự
-            const detailText = formatBatchAnalysis(batch.items, 30); // Giới hạn 30 thay vì 50
-        callSendAPI(sender_psid, {
+            const detailText = formatBatchAnalysis(batch.items, 30); 
+            callSendAPI(sender_psid, {
                 "text": `${detailText}\n\nChọn cách xử lý tiếp theo cho list này:`,
                 "quick_replies": [
                     { "content_type": "text", "title": "👤 Khách Mời", "payload": `BATCH_ROLE|${encodeURIComponent('Khách mời')}|${batchId}` },
                     { "content_type": "text", "title": "🎓 Chuyên Gia", "payload": `BATCH_ROLE|${encodeURIComponent('Chuyên gia')}|${batchId}` },
                     { "content_type": "text", "title": "⏩ Bỏ qua", "payload": `BATCH_ROLE|${encodeURIComponent('BO_QUA')}|${batchId}` }
                 ]
-        });
+            });
             return;
-    }
+        }
 
         batch.selectedRole = roleName;
 
@@ -453,7 +399,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
 
         if (batch.showHistoryShortcut) {
             actionReplies.push({ "content_type": "text", "title": "📜 Xem lịch sử mời", "payload": `BATCH_ACTION|VIEW_HISTORY|${encodeURIComponent(roleName)}|${batchId}` });
-}
+        }
 
         actionReplies.push({ "content_type": "text", "title": "⏩ Bỏ qua", "payload": `BATCH_ACTION|BO_QUA|${encodeURIComponent(roleName)}|${batchId}` });
 
@@ -461,7 +407,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             "text": `📊 Hệ thống ghi nhận list này là [${roleName}].\n👉 Danh sách có ${batch.items.length} link.\n\nBạn muốn làm gì tiếp theo?`,
             "quick_replies": actionReplies
         });
-}
+    }
 
     else if (type === 'BATCH_ACTION') {
         const actionName = parts[1];
@@ -470,7 +416,6 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         const batch = pendingBatches.get(batchId);
 
         if (!batch || batch.sender_psid !== sender_psid) {
-            // Fix lỗi chính tả "Vui lllllà"
             callSendAPI(sender_psid, { "text": "⚠️ Danh sách link tạm đã hết hạn hoặc không hợp lệ. Vui lòng gửi lại list." });
             return;
         }
@@ -497,7 +442,6 @@ async function handleQuickReply(sender_psid, payload, memberName) {
 
         const results = { created: 0, updated: 0, invited: 0, doNotInvite: 0, failed: 0 };
 
-        // Thay thế vòng lặp for bằng hàm tối ưu batchProcessActions
         try {
             const validLinks = batch.items.filter(item => item.valid).map(item => ({
                 guestId: item.guestId,
@@ -505,6 +449,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             }));
 
             if (validLinks.length > 0) {
+                // ĐÃ CHẠY ĐƯỢC: Vì batchProcessActions đã được import ở đầu file
                 const batchResult = await batchProcessActions(validLinks, roleName, memberName, actionName);
                 results.created = batchResult.created;
                 results.updated = batchResult.updated;
@@ -528,22 +473,15 @@ async function handleQuickReply(sender_psid, payload, memberName) {
     }
 }
 
-// Hàm delay
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Gửi tin nhắn có giới hạn - chia nhỏ nếu quá dài
 async function callSendAPI(sender_psid, response) {
     const text = response.text || '';
 
     if (text.length > MAX_MESSAGE_LENGTH) {
-        // Chia thành nhiều tin nhắn
         const chunks = splitMessageIntoChunks(text, MAX_MESSAGE_LENGTH);
         for (let i = 0; i < chunks.length; i++) {
             const chunkMsg = { ...response, text: chunks[i] };
             if (i < chunks.length - 1) {
-                delete chunkMsg.quick_replies; // Chỉ giữ quick_replies ở tin cuối
+                delete chunkMsg.quick_replies; 
             }
             await sendSingleMessage(sender_psid, chunkMsg);
         }

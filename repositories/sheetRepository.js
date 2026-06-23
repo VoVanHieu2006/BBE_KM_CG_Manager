@@ -283,9 +283,9 @@ async function batchProcessActions(links, role, memberName, actionName) {
     const { sheet, lookup } = await loadRoleRows(role);
 
     const rowsToAdd = [];
-    const rowsToUpdate = []; 
-
+    const requests = []; 
     const sheetId = sheet.sheetId;
+
     for (const { guestId, originalLink } of links) {
         const existing = lookup.get(guestId);
         
@@ -299,7 +299,6 @@ async function batchProcessActions(links, role, memberName, actionName) {
 
         if (existing) {
             const currentCount = parseInt(existing.get('So_Lan_Moi') || 0);
-            
             if (actionName === 'MOI') {
                 newInviteCount = (currentCount + 1).toString();
                 newStatus = 'Đang liên hệ';
@@ -308,29 +307,27 @@ async function batchProcessActions(links, role, memberName, actionName) {
                 newStatus = 'Không mời lại';
             }
 
-            // SỬA TẠI ĐÂY: google-spreadsheet row.rowIndex thường là số thứ tự hàng thực tế (1-based)
-            // Ví dụ: Hàng 1 là Header (index 0), Hàng 2 là data đầu tiên (index 1).
-            // Vậy rowIndex của API chính là existing.rowIndex - 1
             const rowIndex = existing.rowIndex - 1;
-            rowsToUpdate.push({
-                rowIndex,
-                values: [guestId, originalLink, memberName, newStatus, role, newInviteCount],
+            
+            // TỐI ƯU: Chỉ cập nhật cụm cell cần thiết thay vì ghi đè cả row để tăng tốc độ
+            requests.push({
+                updateCells: {
+                    start: { sheetId: sheetId, rowIndex: rowIndex, columnIndex: 2 }, // Bắt đầu từ cột Nguoi_Moi
+                    rows: [{
+                        values: [
+                            { userEnteredValue: { stringValue: memberName } }, // Cột 2: Nguoi_Moi
+                            { userEnteredValue: { stringValue: newStatus } },  // Cột 3: Trang_Thai
+                            { userEnteredValue: { stringValue: role } },       // Cột 4: Phan_Loai
+                            { userEnteredValue: { stringValue: newInviteCount } } // Cột 5: So_Lan_Moi
+                        ]
+                    }],
+                    fields: 'userEnteredValue'
+                }
             });
         } else {
-            if (actionName === 'KHONG_MOI') {
-                newInviteCount = '0';
-            }
             rowsToAdd.push([guestId, originalLink, memberName, newStatus, role, newInviteCount]);
         }
     }
-
-    const auth = new google.auth.JWT({
-        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-
-    const requests = [];
 
     if (rowsToAdd.length) {
         requests.push({
@@ -344,21 +341,15 @@ async function batchProcessActions(links, role, memberName, actionName) {
         });
     }
 
-    rowsToUpdate.forEach(u => {
-        requests.push({
-            updateCells: {
-                start: { sheetId: sheetId, rowIndex: u.rowIndex, columnIndex: 0 },
-                rows: [{
-                    values: u.values.map(v => ({ userEnteredValue: { stringValue: String(v) } })),
-                }],
-                fields: '*',
-            },
-        });
-    });
-
     if (requests.length === 0) {
         return { created: 0, updated: 0 };
     }
+
+    const auth = new google.auth.JWT({
+        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
 
     const sheets = google.sheets({ version: 'v4', auth });
     await sheets.spreadsheets.batchUpdate({
@@ -366,7 +357,7 @@ async function batchProcessActions(links, role, memberName, actionName) {
         requestBody: { requests },
     });
 
-    return { created: rowsToAdd.length, updated: rowsToUpdate.length };
+    return { created: rowsToAdd.length, updated: requests.length - (rowsToAdd.length ? 1 : 0) };
 }
 
 module.exports = {
