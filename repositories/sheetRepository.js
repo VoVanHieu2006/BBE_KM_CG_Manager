@@ -286,8 +286,6 @@ async function batchProcessActions(links, role, memberName, actionName) {
     const rowsToUpdate = []; 
 
     const sheetId = sheet.sheetId;
-    const headerRowCount = 1;
-
     for (const { guestId, originalLink } of links) {
         const existing = lookup.get(guestId);
         
@@ -310,7 +308,10 @@ async function batchProcessActions(links, role, memberName, actionName) {
                 newStatus = 'Không mời lại';
             }
 
-            const rowIndex = existing.rowIndex - headerRowCount;
+            // SỬA TẠI ĐÂY: google-spreadsheet row.rowIndex thường là số thứ tự hàng thực tế (1-based)
+            // Ví dụ: Hàng 1 là Header (index 0), Hàng 2 là data đầu tiên (index 1).
+            // Vậy rowIndex của API chính là existing.rowIndex - 1
+            const rowIndex = existing.rowIndex - 1;
             rowsToUpdate.push({
                 rowIndex,
                 values: [guestId, originalLink, memberName, newStatus, role, newInviteCount],
@@ -336,7 +337,7 @@ async function batchProcessActions(links, role, memberName, actionName) {
             appendCells: {
                 sheetId: sheetId,
                 rows: rowsToAdd.map(row => ({
-                    values: row.map(v => ({ userEnteredValue: { stringValue: v } })),
+                    values: row.map(v => ({ userEnteredValue: { stringValue: String(v) } })),
                 })),
                 fields: '*',
             },
@@ -348,7 +349,7 @@ async function batchProcessActions(links, role, memberName, actionName) {
             updateCells: {
                 start: { sheetId: sheetId, rowIndex: u.rowIndex, columnIndex: 0 },
                 rows: [{
-                    values: u.values.map(v => ({ userEnteredValue: { stringValue: v } })),
+                    values: u.values.map(v => ({ userEnteredValue: { stringValue: String(v) } })),
                 }],
                 fields: '*',
             },
@@ -381,4 +382,5 @@ module.exports = {
     batchMarkDoNotInvite,
     batchProcessActions, // Export thêm hàm mới
 };
+
 
