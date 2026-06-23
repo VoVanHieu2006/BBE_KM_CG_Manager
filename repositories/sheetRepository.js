@@ -307,18 +307,24 @@ async function batchProcessActions(links, role, memberName, actionName) {
                 newStatus = 'Không mời lại';
             }
 
-            const rowIndex = existing.rowIndex - 1;
+            // CHỖ CỐT LÕI: Ép kiểu và bảo vệ hàng Header
+            const rawRowIndex = parseInt(existing.rowIndex);
+            if (isNaN(rawRowIndex) || rawRowIndex <= 1) {
+                console.error(`Cảnh báo: rowIndex của khách ${guestId} không hợp lệ hoặc trùng vào Header!`);
+                continue; // Bỏ qua dòng lỗi này, không cho update bậy lên header
+            }
             
-            // TỐI ƯU: Chỉ cập nhật cụm cell cần thiết thay vì ghi đè cả row để tăng tốc độ
+            const rowIndex = rawRowIndex - 1; // 1-based chuyển thành 0-based cho API
+            
             requests.push({
                 updateCells: {
-                    start: { sheetId: sheetId, rowIndex: rowIndex, columnIndex: 2 }, // Bắt đầu từ cột Nguoi_Moi
+                    start: { sheetId: sheetId, rowIndex: rowIndex, columnIndex: 2 }, 
                     rows: [{
                         values: [
-                            { userEnteredValue: { stringValue: memberName } }, // Cột 2: Nguoi_Moi
-                            { userEnteredValue: { stringValue: newStatus } },  // Cột 3: Trang_Thai
-                            { userEnteredValue: { stringValue: role } },       // Cột 4: Phan_Loai
-                            { userEnteredValue: { stringValue: newInviteCount } } // Cột 5: So_Lan_Moi
+                            { userEnteredValue: { stringValue: memberName } }, 
+                            { userEnteredValue: { stringValue: newStatus } },  
+                            { userEnteredValue: { stringValue: role } },       
+                            { userEnteredValue: { stringValue: newInviteCount } } 
                         ]
                     }],
                     fields: 'userEnteredValue'
