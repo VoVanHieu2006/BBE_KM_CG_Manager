@@ -440,6 +440,10 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             return;
         }
 
+        cachedGuestLookup.data = null;
+        cachedGuestLookup.timestamp = 0;
+
+
         const results = { created: 0, updated: 0, invited: 0, doNotInvite: 0, failed: 0 };
 
         try {

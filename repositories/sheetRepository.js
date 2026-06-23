@@ -298,7 +298,12 @@ async function batchProcessActions(links, role, memberName, actionName) {
         }
 
         if (existing) {
-            const currentCount = parseInt(existing.get('So_Lan_Moi') || 0);
+            // SỬA TẠI ĐÂY: Ép kiểu an toàn tuyệt đối, loại bỏ khoảng trắng và chống NaN
+            let currentCount = parseInt(String(existing.get('So_Lan_Moi')).trim(), 10);
+            if (isNaN(currentCount)) {
+                currentCount = 0; // Nếu lỗi format, đưa về 0 thay vì làm crash phép tính
+            }
+
             if (actionName === 'MOI') {
                 newInviteCount = (currentCount + 1).toString();
                 newStatus = 'Đang liên hệ';
@@ -307,15 +312,9 @@ async function batchProcessActions(links, role, memberName, actionName) {
                 newStatus = 'Không mời lại';
             }
 
-            // CHỖ CỐT LÕI: Ép kiểu và bảo vệ hàng Header
-            const rawRowIndex = parseInt(existing.rowIndex);
-            if (isNaN(rawRowIndex) || rawRowIndex <= 1) {
-                console.error(`Cảnh báo: rowIndex của khách ${guestId} không hợp lệ hoặc trùng vào Header!`);
-                continue; // Bỏ qua dòng lỗi này, không cho update bậy lên header
-            }
-            
-            const rowIndex = rawRowIndex - 1; // 1-based chuyển thành 0-based cho API
-            
+            const rowIndex = parseInt(existing.rowIndex, 10) - 1;
+            if (isNaN(rowIndex) || rowIndex < 1) continue; // Bảo vệ hàng header
+
             requests.push({
                 updateCells: {
                     start: { sheetId: sheetId, rowIndex: rowIndex, columnIndex: 2 }, 
@@ -324,7 +323,7 @@ async function batchProcessActions(links, role, memberName, actionName) {
                             { userEnteredValue: { stringValue: memberName } }, 
                             { userEnteredValue: { stringValue: newStatus } },  
                             { userEnteredValue: { stringValue: role } },       
-                            { userEnteredValue: { stringValue: newInviteCount } } 
+                            { userEnteredValue: { stringValue: String(newInviteCount) } } // Ép hẳn sang String sạch
                         ]
                     }],
                     fields: 'userEnteredValue'
