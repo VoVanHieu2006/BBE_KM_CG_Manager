@@ -280,14 +280,24 @@ async function batchMarkDoNotInvite(guestIds, role) {
  * Tối ưu hóa bằng Google Sheets batchUpdate để tránh Rate Limit và Timeout
  */
 async function batchProcessActions(links, role, memberName, actionName) {
-    const { sheet, lookup } = await loadRoleRows(role);
+    // TỐI ƯU CỐT LÕI: Đọc song song cả lookup tổng để chống trùng và chống lag đồng bộ
+    const { sheet, lookup: roleLookup } = await loadRoleRows(role);
+    const crossLookup = await loadGuestLookupAcrossRoles(); 
 
     const rowsToAdd = [];
     const requests = []; 
     const sheetId = sheet.sheetId;
 
     for (const { guestId, originalLink } of links) {
-        const existing = lookup.get(guestId);
+        // Ưu tiên lấy từ roleLookup, nếu không có thì kiểm tra chéo ở crossLookup
+        let existing = roleLookup.get(guestId);
+        if (!existing && crossLookup.has(guestId)) {
+            const crossItem = crossLookup.get(guestId);
+            // Nếu khách đã nằm đúng sheet role này rồi thì lấy row đó luôn
+            if (crossItem.sheetTitle === resolveSheetTitle(role)) {
+                existing = crossItem.row;
+            }
+        }
         
         let newInviteCount = '1';
         let newStatus = 'Đang liên hệ';
@@ -298,10 +308,10 @@ async function batchProcessActions(links, role, memberName, actionName) {
         }
 
         if (existing) {
-            // SỬA TẠI ĐÂY: Ép kiểu an toàn tuyệt đối, loại bỏ khoảng trắng và chống NaN
+            // Ép kiểu an toàn tuyệt đối
             let currentCount = parseInt(String(existing.get('So_Lan_Moi')).trim(), 10);
             if (isNaN(currentCount)) {
-                currentCount = 0; // Nếu lỗi format, đưa về 0 thay vì làm crash phép tính
+                currentCount = 0; 
             }
 
             if (actionName === 'MOI') {
@@ -323,13 +333,14 @@ async function batchProcessActions(links, role, memberName, actionName) {
                             { userEnteredValue: { stringValue: memberName } }, 
                             { userEnteredValue: { stringValue: newStatus } },  
                             { userEnteredValue: { stringValue: role } },       
-                            { userEnteredValue: { stringValue: String(newInviteCount) } } // Ép hẳn sang String sạch
+                            { userEnteredValue: { stringValue: String(newInviteCount) } } 
                         ]
                     }],
                     fields: 'userEnteredValue'
                 }
             });
         } else {
+            // Nếu thực sự chưa có thì mới thêm mới
             rowsToAdd.push([guestId, originalLink, memberName, newStatus, role, newInviteCount]);
         }
     }
