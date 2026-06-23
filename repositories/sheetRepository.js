@@ -75,7 +75,7 @@ async function loadGuestLookupAcrossRoles() {
             continue;
         }
 
-        const rows = await sheet.getRows();
+        const rows = await sheet.getRows({ offset: 0 });
         for (const row of rows) {
             const guestId = row.get('ID_Khach');
             if (!guestId || lookup.has(guestId)) {
@@ -94,7 +94,8 @@ async function loadGuestLookupAcrossRoles() {
 
 async function loadRoleRows(role) {
     const sheet = await getOrCreateRoleSheet(role);
-    const rows = await sheet.getRows();
+    const rows = await sheet.getRows({ offset: 0 }); 
+    
     const lookup = new Map();
 
     for (const row of rows) {
@@ -102,7 +103,6 @@ async function loadRoleRows(role) {
         if (!guestId) {
             continue;
         }
-
         lookup.set(guestId, row);
     }
 
