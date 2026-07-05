@@ -111,7 +111,10 @@ function buildFacebookIdentity(cleanUrl, rawUrl) {
     const usernameMatch = pathname.match(/^\/([a-zA-Z0-9.]+)$/);
     if (usernameMatch) {
         const username = usernameMatch[1].replace(/\/$/, '').toLowerCase();
-        const invalidPaths = new Set(['profile.php', 'groups', 'pages', 'events', 'watch', 'story.php']);
+        const invalidPaths = new Set([
+            'profile.php', 'groups', 'pages', 'events', 'watch', 'story.php',
+            'login', 'login.php', 'checkpoint', 'checkpoint.php', 'r.php', 'reg', 'register'
+        ]);
 
         if (!invalidPaths.has(username)) {
             return {
