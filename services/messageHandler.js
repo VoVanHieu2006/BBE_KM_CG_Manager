@@ -62,12 +62,6 @@ async function handleMessage(sender_psid, parsedLink, memberName) {
             return;
         }
 
-        if (linkData.sourceType === 'share') {
-            callSendAPI(sender_psid, {
-                "text": "⚠️ Vì chính sách của Facebook nên link share sẽ không chính xác 100%. Nếu được thì bạn copy link profile gốc (bấm vào tên người) rồi gửi lại cho chuẩn nhé!"
-            });
-        }
-
         sendRoleSelection(sender_psid, linkData);
     } catch (error) {
         console.error(error);
