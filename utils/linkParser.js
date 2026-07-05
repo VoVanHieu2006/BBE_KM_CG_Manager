@@ -108,6 +108,27 @@ function buildFacebookIdentity(cleanUrl, rawUrl) {
         }
     }
 
+    const peopleMatch = pathname.match(/^\/people\/[^/]+\/([a-zA-Z0-9.]+)/);
+    if (peopleMatch) {
+        const id = peopleMatch[1];
+        if (/^\d+$/.test(id)) {
+            return {
+                guestId: `profile:id:${id}`,
+                canonicalUrl: `${cleanUrl.origin}/profile.php?id=${id}`,
+                rawUrl,
+                sourceType: 'people-id',
+            };
+        } else {
+            return {
+                guestId: `profile:pfbid:${id}`,
+                canonicalUrl,
+                rawUrl,
+                sourceType: 'people-pfbid',
+                needsResolve: true,
+            };
+        }
+    }
+
     const usernameMatch = pathname.match(/^\/([a-zA-Z0-9.]+)$/);
     if (usernameMatch) {
         const username = usernameMatch[1].replace(/\/$/, '').toLowerCase();

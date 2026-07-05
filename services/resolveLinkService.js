@@ -38,7 +38,41 @@ async function resolveShareLink(rawUrl) {
         });
 
         const finalUrl = response.request.res.responseUrl || response.request._currentUrl || rawUrl;
+        
+        let numericId = null;
+        const html = response.data;
+        if (typeof html === 'string') {
+            const fbProfileMatch = html.match(/fb:\/\/profile\/(\d+)/i);
+            if (fbProfileMatch && fbProfileMatch[1]) {
+                numericId = fbProfileMatch[1];
+            }
+        }
+
         const parsed = parseFacebookUrl(finalUrl);
+
+        if (parsed && parsed.guestId && parsed.sourceType === 'profile-username') {
+            const result = {
+                originalLink: parsed.canonicalUrl,
+                guestId: parsed.guestId,
+                sourceType: parsed.sourceType,
+                resolvedFrom: rawUrl,
+            };
+            memCache.set(rawUrl, result);
+            setShareCache(rawUrl, result.originalLink, result.guestId).catch(() => {});
+            return result;
+        }
+
+        if (numericId) {
+            const result = {
+                originalLink: `https://facebook.com/profile.php?id=${numericId}`,
+                guestId: `profile:id:${numericId}`,
+                sourceType: 'profile-id',
+                resolvedFrom: rawUrl,
+            };
+            memCache.set(rawUrl, result);
+            setShareCache(rawUrl, result.originalLink, result.guestId).catch(() => {});
+            return result;
+        }
 
         if (parsed && parsed.guestId && !parsed.sourceType.startsWith('share') && !parsed.sourceType.startsWith('share-')) {
             const result = {
