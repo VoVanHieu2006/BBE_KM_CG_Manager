@@ -1,6 +1,6 @@
 const { saveOrUpdateRole, incrementInviteCount, markAsDoNotInvite, batchProcessActions } = require('../repositories/sheetRepository');
 const { callSendAPI } = require('./facebookSender');
-const { pendingBatches, cachedGuestLookup } = require('../store/inMemoryStore');
+const { pendingBatches, pendingSingleLinks, cachedGuestLookup } = require('../store/inMemoryStore');
 const { formatBatchAnalysis } = require('./messageHandler');
 
 async function handleQuickReply(sender_psid, payload, memberName) {
@@ -9,10 +9,19 @@ async function handleQuickReply(sender_psid, payload, memberName) {
 
     if (type === 'ROLE') {
         const roleName = decodeURIComponent(parts[1] || 'Khách mời');
-        const guestId = decodeURIComponent(parts[2] || '');
-        const url = decodeURIComponent(parts[3] || '');
+        const linkRefId = parts[2];
+        const pending = pendingSingleLinks.get(linkRefId);
+
+        if (!pending || pending.sender_psid !== sender_psid) {
+            callSendAPI(sender_psid, { "text": "⚠️ Dữ liệu link đã hết hạn, bạn gửi lại link nhé!" });
+            return;
+        }
+
+        const guestId = pending.guestId;
+        const url = pending.canonicalUrl;
 
         if (roleName === 'BO_QUA') {
+            pendingSingleLinks.delete(linkRefId);
             callSendAPI(sender_psid, { "text": "⏭️ Đã bỏ qua thao tác. Dữ liệu giữ nguyên trạng thái cũ." });
             return;
         }
@@ -22,9 +31,9 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             let response = {
                 "text": `📊 Hệ thống ghi nhận: ${roleName}.\n👉 Người này đã được mời: ${result.inviteCount} lần.\n\nBạn muốn làm gì tiếp theo?`,
                 "quick_replies": [
-                    { "content_type": "text", "title": "💌 Mời", "payload": `ACTION|MOI|${encodeURIComponent(roleName)}|${encodeURIComponent(guestId)}` },
-                    { "content_type": "text", "title": "🚫 Không mời lại", "payload": `ACTION|KHONG_MOI|${encodeURIComponent(roleName)}|${encodeURIComponent(guestId)}` },
-                    { "content_type": "text", "title": "⏩ Bỏ qua", "payload": `ACTION|BO_QUA|${encodeURIComponent(roleName)}|${encodeURIComponent(guestId)}` }
+                    { "content_type": "text", "title": "💌 Mời", "payload": `ACTION|MOI|${encodeURIComponent(roleName)}|${linkRefId}` },
+                    { "content_type": "text", "title": "🚫 Không mời lại", "payload": `ACTION|KHONG_MOI|${encodeURIComponent(roleName)}|${linkRefId}` },
+                    { "content_type": "text", "title": "⏩ Bỏ qua", "payload": `ACTION|BO_QUA|${encodeURIComponent(roleName)}|${linkRefId}` }
                 ]
             };
             callSendAPI(sender_psid, response);
@@ -33,9 +42,17 @@ async function handleQuickReply(sender_psid, payload, memberName) {
 
     else if (type === 'ACTION') {
         const actionName = parts[1];
-        const hasNewPayloadShape = parts.length >= 4;
-        const roleName = hasNewPayloadShape ? decodeURIComponent(parts[2] || 'Khách mời') : 'Khách mời';
-        const guestId = hasNewPayloadShape ? decodeURIComponent(parts[3] || '') : decodeURIComponent(parts[2] || '');
+        const roleName = decodeURIComponent(parts[2] || 'Khách mời');
+        const linkRefId = parts[3];
+        const pending = pendingSingleLinks.get(linkRefId);
+
+        if (!pending || pending.sender_psid !== sender_psid) {
+            callSendAPI(sender_psid, { "text": "⚠️ Dữ liệu link đã hết hạn, bạn gửi lại link nhé!" });
+            return;
+        }
+
+        const guestId = pending.guestId;
+
         try {
             if (actionName === 'MOI') {
                 const newCount = await incrementInviteCount(guestId, roleName);
@@ -47,6 +64,8 @@ async function handleQuickReply(sender_psid, payload, memberName) {
                 callSendAPI(sender_psid, { "text": "⏩ Đã hủy thao tác. Dữ liệu giữ nguyên trạng thái cũ." });
             }
         } catch (e) { console.error(e); }
+
+        pendingSingleLinks.delete(linkRefId);
     }
 
     else if (type === 'BATCH_ROLE') {

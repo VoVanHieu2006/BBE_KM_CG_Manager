@@ -1,8 +1,8 @@
 const { parseFacebookUrl, extractUrlCandidates, analyzeFacebookUrl } = require('../utils/linkParser');
 const { findGuestRowAcrossRoles } = require('../repositories/sheetRepository');
 const { callSendAPI } = require('./facebookSender');
-const { getCachedGuestLookup, storePendingBatch, pendingBatches } = require('../store/inMemoryStore');
-const { BATCH_DETAIL_PREVIEW_LIMIT, BATCH_HISTORY_BUTTON_THRESHOLD } = require('../config');
+const { getCachedGuestLookup, storePendingBatch, pendingBatches, pendingSingleLinks, cleanupTimedStoreByField } = require('../store/inMemoryStore');
+const { BATCH_DETAIL_PREVIEW_LIMIT, BATCH_HISTORY_BUTTON_THRESHOLD, EVENT_TTL_MS } = require('../config');
 
 function collectIncomingLinks(message) {
     const collectedRawUrls = [];
@@ -22,16 +22,21 @@ function collectIncomingLinks(message) {
         });
     }
 
-    const parsedLinks = collectedRawUrls
-        .map(item => parseFacebookUrl(item.rawUrl))
-        .filter(Boolean);
+    const parsedItems = collectedRawUrls
+        .map(item => ({ item, parsed: parseFacebookUrl(item.rawUrl) }))
+        .filter(x => Boolean(x.parsed));
 
-    const nonShareLinks = parsedLinks.filter(link => link.sourceType !== 'share');
-    const shareLinks = parsedLinks.filter(link => link.sourceType === 'share');
+    const textOnlyParsed = parsedItems.filter(x => x.item.source === 'text').map(x => x.parsed);
+    const workingSet = textOnlyParsed.length > 0
+        ? textOnlyParsed
+        : parsedItems.map(x => x.parsed);
 
-    const preferredLinks = (parsedLinks.length === 2 && nonShareLinks.length === 1 && shareLinks.length === 1)
+    const nonShareLinks = workingSet.filter(link => link.sourceType !== 'share');
+    const shareLinks = workingSet.filter(link => link.sourceType === 'share');
+
+    const preferredLinks = (workingSet.length === 2 && nonShareLinks.length === 1 && shareLinks.length === 1)
         ? nonShareLinks
-        : parsedLinks;
+        : workingSet;
 
     const seenGuestIds = new Set();
     return preferredLinks.filter(link => {
@@ -58,6 +63,12 @@ async function handleMessage(sender_psid, parsedLink, memberName) {
             return;
         }
 
+        if (linkData.sourceType === 'share') {
+            callSendAPI(sender_psid, {
+                "text": "⚠️ Vì chính sách của Facebook nên link share sẽ không chính xác 100%. Nếu được thì bạn copy link profile gốc (bấm vào tên người) rồi gửi lại cho chuẩn nhé!"
+            });
+        }
+
         sendRoleSelection(sender_psid, linkData);
     } catch (error) {
         console.error(error);
@@ -65,12 +76,22 @@ async function handleMessage(sender_psid, parsedLink, memberName) {
 }
 
 function sendRoleSelection(sender_psid, linkData) {
+    cleanupTimedStoreByField(pendingSingleLinks, EVENT_TTL_MS, 'createdAt');
+
+    const linkRefId = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    pendingSingleLinks.set(linkRefId, {
+        guestId: linkData.guestId,
+        canonicalUrl: linkData.canonicalUrl,
+        sender_psid,
+        createdAt: Date.now(),
+    });
+
     let response = {
         "text": "🎯 Khách này hợp lệ. Vui lòng chọn phân loại:",
         "quick_replies": [
-            { "content_type": "text", "title": "👤 Khách Mời", "payload": `ROLE|${encodeURIComponent('Khách mời')}|${encodeURIComponent(linkData.guestId)}|${encodeURIComponent(linkData.canonicalUrl)}` },
-            { "content_type": "text", "title": "🎓 Chuyên Gia", "payload": `ROLE|${encodeURIComponent('Chuyên gia')}|${encodeURIComponent(linkData.guestId)}|${encodeURIComponent(linkData.canonicalUrl)}` },
-            { "content_type": "text", "title": "⏭️ Bỏ qua", "payload": `ROLE|${encodeURIComponent('BO_QUA')}|${encodeURIComponent(linkData.guestId)}|${encodeURIComponent(linkData.canonicalUrl)}` }
+            { "content_type": "text", "title": "👤 Khách Mời", "payload": `ROLE|${encodeURIComponent('Khách mời')}|${linkRefId}` },
+            { "content_type": "text", "title": "🎓 Chuyên Gia", "payload": `ROLE|${encodeURIComponent('Chuyên gia')}|${linkRefId}` },
+            { "content_type": "text", "title": "⏭️ Bỏ qua", "payload": `ROLE|${encodeURIComponent('BO_QUA')}|${linkRefId}` }
         ]
     };
     callSendAPI(sender_psid, response);

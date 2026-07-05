@@ -98,6 +98,19 @@ function buildFacebookIdentity(cleanUrl, rawUrl) {
         }
     }
 
+    const IDENTITY_PARAMS = ['profile_id', 'id', 'fbid', 'uid'];
+    for (const param of IDENTITY_PARAMS) {
+        const value = cleanUrl.searchParams.get(param);
+        if (value && /^\d+$/.test(value)) {
+            return {
+                guestId: `profile:id:${value}`,
+                canonicalUrl,
+                rawUrl,
+                sourceType: `query-${param}`,
+            };
+        }
+    }
+
     return null;
 }
 

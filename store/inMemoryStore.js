@@ -3,6 +3,7 @@ const { loadGuestLookupAcrossRoles } = require('../repositories/sheetRepository'
 
 const processedMessageIds = new Map();
 const pendingBatches = new Map();
+const pendingSingleLinks = new Map();
 const cachedGuestLookup = { data: null, timestamp: 0 };
 
 function wasMessageProcessed(messageId) {
@@ -16,6 +17,13 @@ function cleanupTimedStore(store, ttlMs) {
     const cutoff = Date.now() - ttlMs;
     for (const [key, timestamp] of store.entries()) {
         if (timestamp < cutoff) store.delete(key);
+    }
+}
+
+function cleanupTimedStoreByField(store, ttlMs, field) {
+    const cutoff = Date.now() - ttlMs;
+    for (const [key, value] of store.entries()) {
+        if (value[field] < cutoff) store.delete(key);
     }
 }
 
@@ -53,9 +61,11 @@ async function getCachedGuestLookup() {
 module.exports = {
     processedMessageIds,
     pendingBatches,
+    pendingSingleLinks,
     cachedGuestLookup,
     wasMessageProcessed,
     cleanupTimedStore,
+    cleanupTimedStoreByField,
     cleanupPendingBatches,
     storePendingBatch,
     getCachedGuestLookup,
