@@ -3,6 +3,7 @@ const { findGuestRowAcrossRoles } = require('../repositories/sheetRepository');
 const { callSendAPI } = require('./facebookSender');
 const { getCachedGuestLookup, storePendingBatch, pendingBatches, pendingSingleLinks, cleanupTimedStoreByField } = require('../store/inMemoryStore');
 const { BATCH_DETAIL_PREVIEW_LIMIT, BATCH_HISTORY_BUTTON_THRESHOLD, EVENT_TTL_MS } = require('../config');
+const { resolveShareLink, resolveAllShareLinks } = require('./resolveLinkService');
 
 function collectIncomingLinks(message) {
     const collectedRawUrls = [];
@@ -30,8 +31,8 @@ function collectIncomingLinks(message) {
         ? textOnlyParsed
         : parsedItems.map(x => x.parsed);
 
-    const nonShareLinks = workingSet.filter(link => link.sourceType !== 'share');
-    const shareLinks = workingSet.filter(link => link.sourceType === 'share');
+    const nonShareLinks = workingSet.filter(link => link.sourceType !== 'share' && link.sourceType !== 'share-fbme');
+    const shareLinks = workingSet.filter(link => link.sourceType === 'share' || link.sourceType === 'share-fbme');
 
     const preferredLinks = (workingSet.length === 2 && nonShareLinks.length === 1 && shareLinks.length === 1)
         ? nonShareLinks
@@ -50,6 +51,15 @@ async function handleMessage(sender_psid, parsedLink, memberName) {
     if (!linkData || !linkData.guestId) {
         callSendAPI(sender_psid, { "text": "🤖 Link không đúng định dạng Facebook profile rồi bạn ơi!" });
         return;
+    }
+
+    if (linkData.needsResolve) {
+        const resolved = await resolveShareLink(linkData.rawUrl);
+        if (resolved && resolved.guestId && !resolved.guestId.startsWith('share:')) {
+            linkData.guestId = resolved.guestId;
+            linkData.canonicalUrl = resolved.originalLink;
+            linkData.sourceType = `resolved-${resolved.sourceType || linkData.sourceType}`;
+        }
     }
 
     try {
@@ -91,7 +101,9 @@ function sendRoleSelection(sender_psid, linkData) {
 }
 
 async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
-    const validLinks = incomingLinks.filter(link => link);
+    let validLinks = incomingLinks.filter(link => link);
+
+    validLinks = await resolveAllShareLinks(validLinks);
 
     if (validLinks.length > 30) {
         callSendAPI(sender_psid, {
@@ -136,47 +148,59 @@ async function buildBatchAnalysis(incomingLinks) {
     const existingLookup = await getCachedGuestLookup();
 
     for (const link of incomingLinks) {
-        const analyzed = analyzeFacebookUrl(link.rawUrl);
+        let guestId, canonicalUrl, sourceType;
 
-        if (!analyzed || !analyzed.valid) {
-            summary.invalidCount += 1;
-            items.push({
-                rawUrl: link.rawUrl,
-                valid: false,
-                reason: analyzed ? analyzed.reason : 'invalid-url',
-                inviteCount: 0,
-                status: 'Không hợp lệ',
-            });
-            continue;
+        if (link.resolvedFromShare) {
+            guestId = link.guestId;
+            canonicalUrl = link.canonicalUrl;
+            sourceType = link.sourceType;
+        } else {
+            const analyzed = analyzeFacebookUrl(link.rawUrl);
+
+            if (!analyzed || !analyzed.valid) {
+                summary.invalidCount += 1;
+                items.push({
+                    rawUrl: link.rawUrl,
+                    valid: false,
+                    reason: analyzed ? analyzed.reason : 'invalid-url',
+                    inviteCount: 0,
+                    status: 'Không hợp lệ',
+                });
+                continue;
+            }
+
+            guestId = analyzed.guestId;
+            canonicalUrl = analyzed.canonicalUrl;
+            sourceType = analyzed.sourceType;
         }
 
-        if (seenGuestIds.has(analyzed.guestId)) {
+        if (seenGuestIds.has(guestId)) {
             summary.duplicateCount += 1;
             items.push({
                 rawUrl: link.rawUrl,
                 valid: false,
                 reason: 'duplicate-in-list',
-                guestId: analyzed.guestId,
-                canonicalUrl: analyzed.canonicalUrl,
+                guestId,
+                canonicalUrl,
                 inviteCount: 0,
                 status: 'Trùng trong list',
             });
             continue;
         }
 
-        seenGuestIds.add(analyzed.guestId);
+        seenGuestIds.add(guestId);
         summary.validCount += 1;
 
-        const existing = existingLookup.get(analyzed.guestId);
+        const existing = existingLookup.get(guestId);
         const inviteCount = existing ? parseInt(existing.row.get('So_Lan_Moi') || 0) : 0;
         const currentStatus = existing ? existing.row.get('Trang_Thai') || 'Đang khởi tạo' : 'Chưa có trong sheet';
 
         items.push({
             rawUrl: link.rawUrl,
             valid: true,
-            guestId: analyzed.guestId,
-            canonicalUrl: analyzed.canonicalUrl,
-            sourceType: analyzed.sourceType,
+            guestId,
+            canonicalUrl,
+            sourceType,
             inviteCount,
             status: currentStatus,
             sheetTitle: existing ? existing.sheetTitle : null,

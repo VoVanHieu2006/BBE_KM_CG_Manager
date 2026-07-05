@@ -1,6 +1,8 @@
 const crypto = require('crypto');
 
 function normalizeFacebookHost(hostname) {
+    const host = hostname.toLowerCase();
+    if (host === 'fb.me' || host.endsWith('.fb.me')) return 'fb.me';
     return 'facebook.com';
 }
 
@@ -9,8 +11,10 @@ function isFacebookHost(hostname) {
     return (
         host === 'facebook.com' ||
         host === 'fb.com' ||
+        host === 'fb.me' ||
         host.endsWith('.facebook.com') ||
-        host.endsWith('.fb.com')
+        host.endsWith('.fb.com') ||
+        host.endsWith('.fb.me')
     );
 }
 
@@ -87,7 +91,21 @@ function buildFacebookIdentity(cleanUrl, rawUrl) {
             canonicalUrl,
             rawUrl,
             sourceType: 'share',
+            needsResolve: true,
         };
+    }
+
+    if (cleanUrl.hostname === 'fb.me' || cleanUrl.hostname.endsWith('.fb.me')) {
+        const fbmeMatch = pathname.match(/^\/([a-zA-Z0-9_-]+)$/);
+        if (fbmeMatch && fbmeMatch[1].length >= 5) {
+            return {
+                guestId: `share:${stableHash(canonicalUrl)}`,
+                canonicalUrl,
+                rawUrl,
+                sourceType: 'share-fbme',
+                needsResolve: true,
+            };
+        }
     }
 
     const usernameMatch = pathname.match(/^\/([a-zA-Z0-9.]+)$/);
@@ -197,4 +215,4 @@ function analyzeFacebookUrl(rawUrl) {
     }
 }
 
-module.exports = { extractFacebookID, extractFacebookLinks, parseFacebookUrl, extractUrlCandidates, analyzeFacebookUrl };
+module.exports = { extractFacebookID, extractFacebookLinks, parseFacebookUrl, extractUrlCandidates, analyzeFacebookUrl, normalizeFacebookUrl };

@@ -7,6 +7,9 @@ const ROLE_SHEETS = {
     'Chuyên gia': 'ChuyenGia',
 };
 
+const SHARE_CACHE_SHEET = 'ShareLinkCache';
+const SHARE_CACHE_HEADERS = ['Link_Share', 'Link_Goc', 'guestId', 'createdAt'];
+
 const SHEET_HEADERS = ['ID_Khach', 'Link_Goc', 'Nguoi_Moi', 'Trang_Thai', 'Phan_Loai', 'So_Lan_Moi'];
 
 async function initSheet() {
@@ -389,6 +392,45 @@ async function batchProcessActions(links, role, memberName, actionName) {
     return { created: rowsToAdd.length, updated: requests.length - (rowsToAdd.length ? 1 : 0) };
 }
 
+async function getOrCreateShareCacheSheet() {
+    const doc = await initSheet();
+    let sheet = doc.sheetsByTitle[SHARE_CACHE_SHEET];
+    if (!sheet) {
+        sheet = await doc.addSheet({ title: SHARE_CACHE_SHEET, headerValues: SHARE_CACHE_HEADERS });
+    }
+    return sheet;
+}
+
+async function getShareCache(shareUrl) {
+    try {
+        const sheet = await getOrCreateShareCacheSheet();
+        const rows = await sheet.getRows();
+        const row = rows.find(r => r.get('Link_Share') === shareUrl);
+        if (row) {
+            return {
+                originalLink: row.get('Link_Goc'),
+                guestId: row.get('guestId'),
+            };
+        }
+    } catch (e) {
+        console.error('getShareCache error:', e.message);
+    }
+    return null;
+}
+
+async function setShareCache(shareUrl, originalLink, guestId) {
+    try {
+        const sheet = await getOrCreateShareCacheSheet();
+        await sheet.addRow({
+            Link_Share: shareUrl,
+            Link_Goc: originalLink || '',
+            guestId: guestId || '',
+            createdAt: new Date().toISOString(),
+        });
+    } catch (e) {
+        console.error('setShareCache error:', e.message);
+    }
+}
 module.exports = {
     getGuestRow,
     findGuestRowAcrossRoles,
@@ -400,7 +442,9 @@ module.exports = {
     resolveSheetTitle,
     batchSaveOrUpdate,
     batchMarkDoNotInvite,
-    batchProcessActions, // Export thêm hàm mới
+    batchProcessActions,
+    getShareCache,
+    setShareCache,
 };
 
 
