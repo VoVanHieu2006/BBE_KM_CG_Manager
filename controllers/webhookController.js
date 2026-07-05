@@ -42,7 +42,11 @@ function postWebhook(req, res) {
                     } else if (extractedLinks.length > 1) {
                         handleBatchMessage(sender_psid, extractedLinks, memberName).catch(error => console.error(error));
                     } else {
-                        callSendAPI(sender_psid, { "text": "🤖 Vui lòng gửi Link Facebook cá nhân nhé, mình không hiểu định dạng này." });
+                        const textHadUrlLookingContent = /https?:\/\//.test(webhook_event.message.text || '');
+                        const feedbackText = textHadUrlLookingContent
+                            ? "🤖 Mình thấy có link nhưng không nhận diện được đây là link Facebook cá nhân hợp lệ. Bạn kiểm tra lại link hoặc gửi link khác nhé!"
+                            : "🤖 Vui lòng gửi Link Facebook cá nhân nhé, mình không hiểu định dạng này.";
+                        callSendAPI(sender_psid, { "text": feedbackText });
                     }
                 }
             });

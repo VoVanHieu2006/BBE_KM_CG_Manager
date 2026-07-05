@@ -7,12 +7,10 @@ const { BATCH_DETAIL_PREVIEW_LIMIT, BATCH_HISTORY_BUTTON_THRESHOLD, EVENT_TTL_MS
 function collectIncomingLinks(message) {
     const collectedRawUrls = [];
 
-    if (message.text) {
-        const textLinks = extractUrlCandidates(message.text);
-        textLinks.forEach(rawUrl => {
-            collectedRawUrls.push({ rawUrl, source: 'text' });
-        });
-    }
+    const textCandidates = message.text ? extractUrlCandidates(message.text) : [];
+    textCandidates.forEach(rawUrl => {
+        collectedRawUrls.push({ rawUrl, source: 'text' });
+    });
 
     if (Array.isArray(message.attachments)) {
         message.attachments.forEach(attachment => {
@@ -27,7 +25,8 @@ function collectIncomingLinks(message) {
         .filter(x => Boolean(x.parsed));
 
     const textOnlyParsed = parsedItems.filter(x => x.item.source === 'text').map(x => x.parsed);
-    const workingSet = textOnlyParsed.length > 0
+    const hasTextCandidates = textCandidates.length > 0;
+    const workingSet = hasTextCandidates
         ? textOnlyParsed
         : parsedItems.map(x => x.parsed);
 

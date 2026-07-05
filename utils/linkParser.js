@@ -1,12 +1,17 @@
 const crypto = require('crypto');
 
 function normalizeFacebookHost(hostname) {
-    return hostname.replace(/^www\./, '').replace(/^m\./, '');
+    return 'facebook.com';
 }
 
 function isFacebookHost(hostname) {
-    const normalizedHost = normalizeFacebookHost(hostname);
-    return normalizedHost === 'facebook.com' || normalizedHost === 'fb.com';
+    const host = hostname.toLowerCase();
+    return (
+        host === 'facebook.com' ||
+        host === 'fb.com' ||
+        host.endsWith('.facebook.com') ||
+        host.endsWith('.fb.com')
+    );
 }
 
 function stableHash(input) {
@@ -41,6 +46,8 @@ function normalizeFacebookUrl(rawUrl) {
         '__cft__',
         '__tn__',
         '__xts__',
+        '_rdc',
+        '_rdr',
     ];
 
     removableParams.forEach(param => cleanUrl.searchParams.delete(param));
