@@ -3,7 +3,7 @@ const { findGuestRowAcrossRoles } = require('../repositories/sheetRepository');
 const { callSendAPI } = require('./facebookSender');
 const { getCachedGuestLookup, storePendingBatch, pendingBatches, pendingSingleLinks, cleanupTimedStoreByField } = require('../store/inMemoryStore');
 const { BATCH_DETAIL_PREVIEW_LIMIT, BATCH_HISTORY_BUTTON_THRESHOLD, EVENT_TTL_MS } = require('../config');
-const { resolveShareLink, resolveAllShareLinks } = require('./resolveLinkService');
+const { resolveShareLink, resolveAllShareLinks, getResolvedLinkFromCache } = require('./resolveLinkService');
 
 function collectIncomingLinks(message) {
     const collectedRawUrls = [];
@@ -176,6 +176,16 @@ async function buildBatchAnalysis(incomingLinks) {
             guestId = analyzed.guestId;
             canonicalUrl = analyzed.canonicalUrl;
             sourceType = analyzed.sourceType;
+
+            // Nâng cấp: Kiểm tra xem link này đã được giải mã lưu trong Cache từ trước chưa
+            if (link.needsResolve) {
+                const cached = await getResolvedLinkFromCache(link.rawUrl).catch(() => null);
+                if (cached && cached.guestId) {
+                    guestId = cached.guestId;
+                    canonicalUrl = cached.originalLink;
+                    sourceType = `resolved-cached`;
+                }
+            }
         }
 
         if (seenGuestIds.has(guestId)) {
