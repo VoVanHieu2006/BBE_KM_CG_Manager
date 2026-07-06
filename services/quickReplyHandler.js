@@ -2,6 +2,7 @@ const { saveOrUpdateRole, incrementInviteCount, markAsDoNotInvite, batchProcessA
 const { callSendAPI } = require('./facebookSender');
 const { pendingBatches, pendingSingleLinks, cachedGuestLookup } = require('../store/inMemoryStore');
 const { formatBatchAnalysis } = require('./messageHandler');
+const { resolveShareLink } = require('./resolveLinkService');
 
 async function handleQuickReply(sender_psid, payload, memberName) {
     const parts = payload.split('|');
@@ -17,8 +18,17 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             return;
         }
 
-        const guestId = pending.guestId;
-        const url = pending.canonicalUrl;
+        let guestId = pending.guestId;
+        let url = pending.canonicalUrl;
+
+        // Fallback: nếu guestId vẫn là share:hash (resolve thất bại trước đó), thử lại từ cache
+        if (guestId.startsWith('share:') && pending.rawUrl) {
+            const reResolved = await resolveShareLink(pending.rawUrl).catch(() => null);
+            if (reResolved && reResolved.guestId && !reResolved.guestId.startsWith('share:')) {
+                guestId = reResolved.guestId;
+                url = reResolved.originalLink;
+            }
+        }
 
         if (roleName === 'BO_QUA') {
             pendingSingleLinks.delete(linkRefId);
@@ -154,13 +164,21 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         const results = { created: 0, updated: 0, invited: 0, doNotInvite: 0, failed: 0 };
 
         try {
-            const validLinks = batch.items.filter(item => item.valid).map(item => ({
-                guestId: item.guestId,
-                originalLink: item.canonicalUrl
+            const rawValidLinks = batch.items.filter(item => item.valid);
+
+            // Re-resolve các share link từ cache trước khi lưu (không gọi HTTP nếu đã cache)
+            const validLinks = await Promise.all(rawValidLinks.map(async (item) => {
+                if (!item.guestId.startsWith('share:')) {
+                    return { guestId: item.guestId, originalLink: item.canonicalUrl };
+                }
+                const resolved = await resolveShareLink(item.canonicalUrl).catch(() => null);
+                if (resolved && resolved.guestId && !resolved.guestId.startsWith('share:')) {
+                    return { guestId: resolved.guestId, originalLink: resolved.originalLink };
+                }
+                return { guestId: item.guestId, originalLink: item.canonicalUrl };
             }));
 
             if (validLinks.length > 0) {
-                // ĐÃ CHẠY ĐƯỢC: Vì batchProcessActions đã được import ở đầu file
                 const batchResult = await batchProcessActions(validLinks, roleName, memberName, actionName);
                 results.created = batchResult.created;
                 results.updated = batchResult.updated;

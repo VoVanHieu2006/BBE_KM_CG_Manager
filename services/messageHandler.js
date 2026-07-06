@@ -85,6 +85,7 @@ function sendRoleSelection(sender_psid, linkData) {
     pendingSingleLinks.set(linkRefId, {
         guestId: linkData.guestId,
         canonicalUrl: linkData.canonicalUrl,
+        rawUrl: linkData.rawUrl,   // Lưu rawUrl để fallback re-resolve ở quickReplyHandler
         sender_psid,
         createdAt: Date.now(),
     });
@@ -103,7 +104,7 @@ function sendRoleSelection(sender_psid, linkData) {
 async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
     let validLinks = incomingLinks.filter(link => link);
 
-    validLinks = await resolveAllShareLinks(validLinks);
+    // Không chờ resolve — trả phân tích NGAY, resolve background để warm cache
 
     if (validLinks.length > 30) {
         callSendAPI(sender_psid, {
@@ -139,6 +140,9 @@ async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
     }
 
     callSendAPI(sender_psid, response);
+
+    // Warm cache background: resolve share links SAU khi đã reply — không block user
+    resolveAllShareLinks(validLinks).catch(() => {});
 }
 
 async function buildBatchAnalysis(incomingLinks) {
