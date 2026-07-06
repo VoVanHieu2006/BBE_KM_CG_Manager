@@ -4,7 +4,29 @@ const { parseFacebookUrl } = require('../utils/linkParser');
 
 const memCache = new Map();
 let lastRequestTime = 0;
-const THROTTLE_MS = 2500;
+const THROTTLE_MS = 800;          // Giảm từ 2500ms → 800ms
+const BATCH_CONCURRENCY = 3;      // Số link share xử lý song song
+
+// ============================================================
+// Normalize cache key: chỉ dùng phần share code ổn định,
+// bỏ các tham số biến đổi như mibextid, wtsid, rdid
+// VD: "https://www.facebook.com/share/1JaXnESwkn/?mibextid=wwXIfr"
+//     → "facebook.com/share/1JaXnESwkn"
+// ============================================================
+function normalizeCacheKey(rawUrl) {
+    try {
+        const url = new URL(rawUrl);
+        const shareMatch = url.pathname.match(/^\/share\/([a-zA-Z0-9_-]+)/);
+        if (shareMatch) {
+            return `facebook.com/share/${shareMatch[1]}`;
+        }
+        if (url.hostname === 'fb.me' || url.hostname.endsWith('.fb.me')) {
+            const fbmeMatch = url.pathname.match(/^\/([a-zA-Z0-9_-]+)$/);
+            if (fbmeMatch) return `fb.me/${fbmeMatch[1]}`;
+        }
+    } catch (e) {}
+    return rawUrl; // fallback: dùng nguyên nếu không match
+}
 
 async function throttleDelay() {
     const now = Date.now();
@@ -16,11 +38,15 @@ async function throttleDelay() {
 }
 
 async function resolveShareLink(rawUrl) {
-    if (memCache.has(rawUrl)) return memCache.get(rawUrl);
+    const cacheKey = normalizeCacheKey(rawUrl);
 
-    const cached = await getShareCache(rawUrl).catch(() => null);
+    // Kiểm tra in-memory cache (key chuẩn hóa)
+    if (memCache.has(cacheKey)) return memCache.get(cacheKey);
+
+    // Kiểm tra Google Sheet cache (key chuẩn hóa)
+    const cached = await getShareCache(cacheKey).catch(() => null);
     if (cached && cached.guestId) {
-        memCache.set(rawUrl, cached);
+        memCache.set(cacheKey, cached);
         return cached;
     }
 
@@ -38,7 +64,8 @@ async function resolveShareLink(rawUrl) {
         });
 
         const finalUrl = response.request.res.responseUrl || response.request._currentUrl || rawUrl;
-        
+
+        // Trích xuất numeric ID từ meta tag fb://profile/<id> trong HTML
         let numericId = null;
         const html = response.data;
         if (typeof html === 'string') {
@@ -50,6 +77,7 @@ async function resolveShareLink(rawUrl) {
 
         const parsed = parseFacebookUrl(finalUrl);
 
+        // Ưu tiên 1: username (ổn định nhất)
         if (parsed && parsed.guestId && parsed.sourceType === 'profile-username') {
             const result = {
                 originalLink: parsed.canonicalUrl,
@@ -57,11 +85,12 @@ async function resolveShareLink(rawUrl) {
                 sourceType: parsed.sourceType,
                 resolvedFrom: rawUrl,
             };
-            memCache.set(rawUrl, result);
-            setShareCache(rawUrl, result.originalLink, result.guestId).catch(() => {});
+            memCache.set(cacheKey, result);
+            setShareCache(cacheKey, result.originalLink, result.guestId).catch(() => {});
             return result;
         }
 
+        // Ưu tiên 2: numeric ID từ HTML (cho tài khoản không có username)
         if (numericId) {
             const result = {
                 originalLink: `https://facebook.com/profile.php?id=${numericId}`,
@@ -69,51 +98,70 @@ async function resolveShareLink(rawUrl) {
                 sourceType: 'profile-id',
                 resolvedFrom: rawUrl,
             };
-            memCache.set(rawUrl, result);
-            setShareCache(rawUrl, result.originalLink, result.guestId).catch(() => {});
+            memCache.set(cacheKey, result);
+            setShareCache(cacheKey, result.originalLink, result.guestId).catch(() => {});
             return result;
         }
 
-        if (parsed && parsed.guestId && !parsed.sourceType.startsWith('share') && !parsed.sourceType.startsWith('share-')) {
+        // Ưu tiên 3: bất kỳ identity hợp lệ nào khác (profile-id, query-profile_id, people-id...)
+        if (parsed && parsed.guestId && !parsed.sourceType.startsWith('share') && !parsed.sourceType.startsWith('share-') && !parsed.needsResolve) {
             const result = {
                 originalLink: parsed.canonicalUrl,
                 guestId: parsed.guestId,
                 sourceType: parsed.sourceType,
                 resolvedFrom: rawUrl,
             };
-            memCache.set(rawUrl, result);
-            setShareCache(rawUrl, result.originalLink, result.guestId).catch(() => {});
+            memCache.set(cacheKey, result);
+            setShareCache(cacheKey, result.originalLink, result.guestId).catch(() => {});
             return result;
         }
     } catch (e) {
-        // silent fail
+        // silent fail — không crash bot
     }
 
     return null;
 }
 
+// ============================================================
+// Xử lý song song: tối đa BATCH_CONCURRENCY link cùng lúc
+// thay vì xử lý tuần tự từng link một
+// ============================================================
 async function resolveAllShareLinks(links) {
-    const resolved = [];
-    for (const link of links) {
-        if (link.needsResolve) {
-            const result = await resolveShareLink(link.rawUrl);
-            if (result && result.guestId) {
-                resolved.push({
+    const result = new Array(links.length);
+
+    // Tách riêng link cần resolve và link bình thường
+    const shareIndices = [];
+    links.forEach((link, i) => {
+        if (link.needsResolve) shareIndices.push(i);
+        else result[i] = link;
+    });
+
+    // Xử lý song song theo nhóm BATCH_CONCURRENCY
+    for (let i = 0; i < shareIndices.length; i += BATCH_CONCURRENCY) {
+        const batch = shareIndices.slice(i, i + BATCH_CONCURRENCY);
+        const resolved = await Promise.all(
+            batch.map(idx => resolveShareLink(links[idx].rawUrl))
+        );
+
+        resolved.forEach((res, j) => {
+            const idx = batch[j];
+            const link = links[idx];
+            if (res && res.guestId) {
+                result[idx] = {
                     ...link,
-                    guestId: result.guestId,
-                    canonicalUrl: result.originalLink,
-                    sourceType: `resolved-${result.sourceType || link.sourceType}`,
+                    guestId: res.guestId,
+                    canonicalUrl: res.originalLink,
+                    sourceType: `resolved-${res.sourceType || link.sourceType}`,
                     rawUrl: link.rawUrl,
                     resolvedFromShare: true,
-                });
+                };
             } else {
-                resolved.push(link);
+                result[idx] = link;
             }
-        } else {
-            resolved.push(link);
-        }
+        });
     }
-    return resolved;
+
+    return result;
 }
 
 module.exports = { resolveShareLink, resolveAllShareLinks };
