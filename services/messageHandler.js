@@ -49,7 +49,7 @@ function collectIncomingLinks(message) {
 async function handleMessage(sender_psid, parsedLink, memberName) {
     const linkData = typeof parsedLink === 'string' ? parseFacebookUrl(parsedLink) : parsedLink;
     if (!linkData || !linkData.guestId) {
-        callSendAPI(sender_psid, { "text": "🤖 Link không đúng định dạng Facebook profile rồi bạn ơi!" });
+        await callSendAPI(sender_psid, { "text": "🤖 Link không đúng định dạng Facebook profile rồi bạn ơi!" });
         return;
     }
 
@@ -68,7 +68,7 @@ async function handleMessage(sender_psid, parsedLink, memberName) {
         const rowInfo = await findGuestRowAcrossRoles(linkData.guestId);
 
         if (rowInfo && rowInfo.row.get('Trang_Thai') === 'Không mời lại') {
-            callSendAPI(sender_psid, {
+            await callSendAPI(sender_psid, {
                 "text": `⚠️ CẢNH BÁO ĐỎ: Người này đã bị đánh dấu [KHÔNG MỜI LẠI]! Vui lòng không tiếp cận.`
             });
             return;
@@ -107,7 +107,7 @@ async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
     let validLinks = incomingLinks.filter(link => link);
 
     if (validLinks.length > 30) {
-        callSendAPI(sender_psid, {
+        await callSendAPI(sender_psid, {
             "text": `⚠️ Danh sách quá lớn (${validLinks.length} link). Hãy chia thành các list nhỏ tầm 15-20 link để bot xử lý mượt mà và an toàn nhất nhé.`
         });
     }
@@ -170,7 +170,7 @@ async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
         response.quick_replies.splice(2, 0, { "content_type": "text", "title": "📜 Xem lịch sử mời", "payload": `BATCH_ROLE|${encodeURIComponent('VIEW_HISTORY')}|${batchId}` });
     }
 
-    callSendAPI(sender_psid, response);
+    await callSendAPI(sender_psid, response);
 
     // Warm cache background: chỉ chạy nếu chưa giải mã inline
     if (!didInlineResolve) {
