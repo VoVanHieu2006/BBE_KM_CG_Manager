@@ -106,15 +106,44 @@ function sendRoleSelection(sender_psid, linkData) {
 async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
     let validLinks = incomingLinks.filter(link => link);
 
-    // Không chờ resolve — trả phân tích NGAY, resolve background để warm cache
-
     if (validLinks.length > 30) {
         callSendAPI(sender_psid, {
             "text": `⚠️ Danh sách quá lớn (${validLinks.length} link). Hãy chia thành các list nhỏ tầm 15-20 link để bot xử lý mượt mà và an toàn nhất nhé.`
         });
     }
 
-    const analysis = await buildBatchAnalysis(validLinks);
+    // Đếm số share link chưa được giải mã nằm trong cache
+    const shareLinks = validLinks.filter(link => link.needsResolve);
+    let uncachedShareCount = 0;
+    const resolvedLinkMap = new Map();
+
+    const { getResolvedLinkFromCache } = require('./resolveLinkService');
+    for (const link of shareLinks) {
+        const cached = await getResolvedLinkFromCache(link.rawUrl).catch(() => null);
+        if (cached && cached.guestId) {
+            resolvedLinkMap.set(link.rawUrl, cached);
+        } else {
+            uncachedShareCount++;
+        }
+    }
+
+    const INLINE_RESOLVE_LIMIT = 5;
+    let didInlineResolve = false;
+
+    // Nếu số link cần giải mã ít (<= 5), giải mã inline ngay lập tức
+    if (uncachedShareCount <= INLINE_RESOLVE_LIMIT && shareLinks.length > 0) {
+        const { resolveShareLink } = require('./resolveLinkService');
+        await Promise.all(shareLinks.map(async (link) => {
+            if (resolvedLinkMap.has(link.rawUrl)) return;
+            const resolved = await resolveShareLink(link.rawUrl).catch(() => null);
+            if (resolved && resolved.guestId) {
+                resolvedLinkMap.set(link.rawUrl, resolved);
+            }
+        }));
+        didInlineResolve = true;
+    }
+
+    const analysis = await buildBatchAnalysis(validLinks, resolvedLinkMap);
     const batchId = storePendingBatch(sender_psid, analysis.items);
     const batch = pendingBatches.get(batchId);
 
@@ -143,11 +172,13 @@ async function handleBatchMessage(sender_psid, incomingLinks, memberName) {
 
     callSendAPI(sender_psid, response);
 
-    // Warm cache background: resolve share links SAU khi đã reply — không block user
-    resolveAllShareLinks(validLinks).catch(() => {});
+    // Warm cache background: chỉ chạy nếu chưa giải mã inline
+    if (!didInlineResolve) {
+        resolveAllShareLinks(validLinks).catch(() => {});
+    }
 }
 
-async function buildBatchAnalysis(incomingLinks) {
+async function buildBatchAnalysis(incomingLinks, resolvedLinkMap = new Map()) {
     const items = [];
     const summary = { validCount: 0, invalidCount: 0, duplicateCount: 0 };
     const seenGuestIds = new Set();
@@ -179,9 +210,9 @@ async function buildBatchAnalysis(incomingLinks) {
             canonicalUrl = analyzed.canonicalUrl;
             sourceType = analyzed.sourceType;
 
-            // Nâng cấp: Kiểm tra xem link này đã được giải mã lưu trong Cache từ trước chưa
+            // Nâng cấp: Kiểm tra xem link này đã được giải mã lưu trong Cache hoặc đã được resolve inline chưa
             if (link.needsResolve) {
-                const cached = await getResolvedLinkFromCache(link.rawUrl).catch(() => null);
+                const cached = resolvedLinkMap.get(link.rawUrl) || await getResolvedLinkFromCache(link.rawUrl).catch(() => null);
                 if (cached && cached.guestId) {
                     guestId = cached.guestId;
                     canonicalUrl = cached.originalLink;
