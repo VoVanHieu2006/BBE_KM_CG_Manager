@@ -62,6 +62,8 @@ async function handleMessage(sender_psid, parsedLink, memberName) {
         }
     }
 
+
+
     try {
         const rowInfo = await findGuestRowAcrossRoles(linkData.guestId);
 

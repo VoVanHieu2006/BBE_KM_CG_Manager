@@ -12,16 +12,35 @@ const SHARE_CACHE_HEADERS = ['Link_Share', 'Link_Goc', 'guestId', 'createdAt'];
 
 const SHEET_HEADERS = ['ID_Khach', 'Link_Goc', 'Nguoi_Moi', 'Trang_Thai', 'Phan_Loai', 'So_Lan_Moi'];
 
-async function initSheet() {
-    const serviceAccountAuth = new JWT({
-        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+let cachedAuth = null;
+let cachedSheets = null;
+let cachedDoc = null;
+
+function getSheetsClient() {
+    if (cachedSheets) return { auth: cachedAuth, sheets: cachedSheets };
+    const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+    const rawKey = process.env.GOOGLE_PRIVATE_KEY || '';
+    const key = rawKey.includes('\\n') ? rawKey.replace(/\\n/g, '\n') : rawKey;
+    
+    cachedAuth = new JWT({
+        email,
+        key,
         scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
+    cachedSheets = google.sheets({ version: 'v4', auth: cachedAuth });
+    return { auth: cachedAuth, sheets: cachedSheets };
+}
 
-    const doc = new GoogleSpreadsheet(process.env.SHEET_ID, serviceAccountAuth);
-    await doc.loadInfo();
-    return doc;
+async function getDoc() {
+    if (cachedDoc) return cachedDoc;
+    const { auth } = getSheetsClient();
+    cachedDoc = new GoogleSpreadsheet(process.env.SHEET_ID, auth);
+    await cachedDoc.loadInfo();
+    return cachedDoc;
+}
+
+async function initSheet() {
+    return getDoc();
 }
 
 function resolveSheetTitle(role) {
@@ -52,12 +71,7 @@ async function loadGuestLookupAcrossRoles() {
     const sheetTitles = Object.values(ROLE_SHEETS);
     const lookup = new Map();
 
-    const auth = new google.auth.JWT({
-        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-    const sheets = google.sheets({ version: 'v4', auth });
+    const { sheets } = getSheetsClient();
 
     for (const sheetTitle of sheetTitles) {
         try {
@@ -103,12 +117,7 @@ async function loadRoleRows(role) {
     const sheet = await getOrCreateRoleSheet(role);
     const sheetTitle = resolveSheetTitle(role);
 
-    const auth = new google.auth.JWT({
-        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-    const sheets = google.sheets({ version: 'v4', auth });
+    const { sheets } = getSheetsClient();
 
     const response = await sheets.spreadsheets.values.get({
         spreadsheetId: process.env.SHEET_ID,
@@ -142,12 +151,7 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
     const existing = lookup.get(guestId);
     const sheetTitle = resolveSheetTitle(role);
 
-    const auth = new google.auth.JWT({
-        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-    const sheets = google.sheets({ version: 'v4', auth });
+    const { sheets } = getSheetsClient();
 
     if (existing && existing.sheetTitle === sheetTitle) {
         const rowIndex = existing.row.rowIndex;
@@ -167,19 +171,50 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
             inviteCount: currentCount,
         };
     } else {
+        if (existing && existing.sheetTitle !== sheetTitle) {
+            const oldDoc = await getDoc();
+            const oldSheet = oldDoc.sheetsByTitle[existing.sheetTitle];
+            if (oldSheet) {
+                const oldSheetId = oldSheet.sheetId;
+                const oldRowIndex = existing.row.rowIndex;
+                await sheets.spreadsheets.batchUpdate({
+                    spreadsheetId: process.env.SHEET_ID,
+                    requestBody: {
+                        requests: [
+                            {
+                                deleteDimension: {
+                                    range: {
+                                        sheetId: oldSheetId,
+                                        dimension: 'ROWS',
+                                        startIndex: oldRowIndex - 1,
+                                        endIndex: oldRowIndex
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                }).catch(err => {
+                    console.error(`Error deleting old role row in sheet ${existing.sheetTitle}:`, err);
+                });
+            }
+        }
+
+        const initialStatus = existing ? existing.row.get('Trang_Thai') : 'Đang khởi tạo';
+        const initialCount = existing ? parseInt(existing.row.get('So_Lan_Moi') || 0) : 0;
+
         await sheets.spreadsheets.values.append({
             spreadsheetId: process.env.SHEET_ID,
             range: `${sheetTitle}!A:F`,
             valueInputOption: 'USER_ENTERED',
             insertDataOption: 'INSERT_ROWS',
             requestBody: {
-                values: [[guestId, originalLink, memberName, 'Đang khởi tạo', role, '0']],
+                values: [[guestId, originalLink, memberName, initialStatus, role, String(initialCount)]],
             },
         });
 
         return {
-            status: 'created',
-            inviteCount: 0,
+            status: existing ? 'updated' : 'created',
+            inviteCount: initialCount,
         };
     }
 }
@@ -195,12 +230,7 @@ async function incrementInviteCount(guestId, role) {
         const currentCount = parseInt(existing.row.get('So_Lan_Moi') || 0);
         const newCount = currentCount + 1;
 
-        const auth = new google.auth.JWT({
-            email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-            key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-        });
-        const sheets = google.sheets({ version: 'v4', auth });
+        const { sheets } = getSheetsClient();
 
         await sheets.spreadsheets.values.update({
             spreadsheetId: process.env.SHEET_ID,
@@ -225,12 +255,7 @@ async function markAsDoNotInvite(guestId, role) {
     if (existing && existing.sheetTitle === sheetTitle) {
         const rowIndex = existing.row.rowIndex;
 
-        const auth = new google.auth.JWT({
-            email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-            key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-        });
-        const sheets = google.sheets({ version: 'v4', auth });
+        const { sheets } = getSheetsClient();
 
         await sheets.spreadsheets.values.update({
             spreadsheetId: process.env.SHEET_ID,
@@ -274,12 +299,7 @@ async function batchMarkDoNotInvite(guestIds, role) {
 
     if (requests.length === 0) return { updated: 0 };
 
-    const auth = new google.auth.JWT({
-        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-    const sheets = google.sheets({ version: 'v4', auth });
+    const { sheets } = getSheetsClient();
     await sheets.spreadsheets.batchUpdate({
         spreadsheetId: process.env.SHEET_ID,
         requestBody: { requests },
@@ -357,13 +377,7 @@ async function batchProcessActions(links, role, memberName, actionName) {
         return { created: 0, updated: 0 };
     }
 
-    const auth = new google.auth.JWT({
-        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-
-    const sheets = google.sheets({ version: 'v4', auth });
+    const { sheets } = getSheetsClient();
     await sheets.spreadsheets.batchUpdate({
         spreadsheetId: process.env.SHEET_ID,
         requestBody: { requests },
@@ -382,44 +396,51 @@ async function getOrCreateShareCacheSheet() {
 }
 
 // Đọc cache link share (Dùng Sheets API nhẹ)
-async function getShareCache(shareUrl) {
+let shareCacheMap = null;
+
+async function loadShareCacheIntoMemory() {
+    if (shareCacheMap) return;
+    shareCacheMap = new Map();
     try {
-        const auth = new google.auth.JWT({
-            email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-            key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-        });
-        const sheets = google.sheets({ version: 'v4', auth });
-        
+        const { sheets } = getSheetsClient();
         const response = await sheets.spreadsheets.values.get({
             spreadsheetId: process.env.SHEET_ID,
-            range: `${SHARE_CACHE_SHEET}!A2:C`, 
+            range: `${SHARE_CACHE_SHEET}!A2:C`,
         });
-        
         const rows = response.data.values || [];
-        const row = rows.find(r => r[0] === shareUrl);
-        if (row) {
-            return {
-                originalLink: row[1],
-                guestId: row[2],
-            };
-        }
+        rows.forEach(row => {
+            const shareUrl = row[0];
+            if (shareUrl) {
+                shareCacheMap.set(shareUrl, {
+                    originalLink: row[1] || '',
+                    guestId: row[2] || '',
+                });
+            }
+        });
     } catch (e) {
-        console.error('getShareCache error:', e.message);
+        console.error('loadShareCacheIntoMemory error:', e.message);
+        shareCacheMap = null;
+    }
+}
+
+// Đọc cache link share (Dùng in-memory cache kết hợp Sheets API)
+async function getShareCache(shareUrl) {
+    await loadShareCacheIntoMemory();
+    if (shareCacheMap && shareCacheMap.has(shareUrl)) {
+        return shareCacheMap.get(shareUrl);
     }
     return null;
 }
 
-// Ghi cache link share (Dùng Sheets API nhẹ)
+// Ghi cache link share (Dùng in-memory cache kết hợp Sheets API, chặn trùng lặp)
 async function setShareCache(shareUrl, originalLink, guestId) {
+    await loadShareCacheIntoMemory();
+    if (shareCacheMap && shareCacheMap.has(shareUrl)) {
+        return;
+    }
+    
     try {
-        const auth = new google.auth.JWT({
-            email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-            key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-        });
-        const sheets = google.sheets({ version: 'v4', auth });
-        
+        const { sheets } = getSheetsClient();
         await sheets.spreadsheets.values.append({
             spreadsheetId: process.env.SHEET_ID,
             range: `${SHARE_CACHE_SHEET}!A:D`,
@@ -429,6 +450,13 @@ async function setShareCache(shareUrl, originalLink, guestId) {
                 values: [[shareUrl, originalLink || '', guestId || '', new Date().toISOString()]],
             },
         });
+        
+        if (shareCacheMap) {
+            shareCacheMap.set(shareUrl, {
+                originalLink: originalLink || '',
+                guestId: guestId || '',
+            });
+        }
     } catch (e) {
         console.error('setShareCache error:', e.message);
     }

@@ -28,13 +28,24 @@ function normalizeCacheKey(rawUrl) {
     return rawUrl; // fallback: dùng nguyên nếu không match
 }
 
+let lastRequestPromise = Promise.resolve();
+
 async function throttleDelay() {
+    const currentPromise = lastRequestPromise;
+    let resolveNext;
+    lastRequestPromise = new Promise(resolve => {
+        resolveNext = resolve;
+    });
+
+    await currentPromise;
+
     const now = Date.now();
     const elapsed = now - lastRequestTime;
     if (elapsed < THROTTLE_MS) {
         await new Promise(resolve => setTimeout(resolve, THROTTLE_MS - elapsed));
     }
     lastRequestTime = Date.now();
+    resolveNext();
 }
 
 async function resolveShareLink(rawUrl) {

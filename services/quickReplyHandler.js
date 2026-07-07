@@ -38,6 +38,10 @@ async function handleQuickReply(sender_psid, payload, memberName) {
 
         try {
             const result = await saveOrUpdateRole(guestId, url, memberName, roleName);
+            
+            cachedGuestLookup.data = null;
+            cachedGuestLookup.timestamp = 0;
+
             let response = {
                 "text": `📊 Hệ thống ghi nhận: ${roleName}.\n👉 Người này đã được mời: ${result.inviteCount} lần.\n\nBạn muốn làm gì tiếp theo?`,
                 "quick_replies": [
@@ -73,6 +77,9 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             } else if (actionName === 'BO_QUA') {
                 callSendAPI(sender_psid, { "text": "⏩ Đã hủy thao tác. Dữ liệu giữ nguyên trạng thái cũ." });
             }
+            
+            cachedGuestLookup.data = null;
+            cachedGuestLookup.timestamp = 0;
         } catch (e) { console.error(e); }
 
         pendingSingleLinks.delete(linkRefId);
