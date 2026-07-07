@@ -40,61 +40,65 @@ async function getOrCreateRoleSheet(role) {
     return sheet;
 }
 
-// Lấy thông tin khách mời nếu đã tồn tại
-async function getGuestRow(guestId, role) {
-    const sheet = await getOrCreateRoleSheet(role);
-    const rows = await sheet.getRows();
-    return rows.find(row => row.get('ID_Khach') === guestId);
-}
-
+// Tìm kiếm khách hàng trên tất cả vai trò (Dùng cache trong inMemoryStore để có tốc độ tức thời)
 async function findGuestRowAcrossRoles(guestId) {
-    const doc = await initSheet();
-    const sheetTitles = Object.values(ROLE_SHEETS);
-
-    for (const sheetTitle of sheetTitles) {
-        let sheet = doc.sheetsByTitle[sheetTitle];
-        if (!sheet) {
-            continue;
-        }
-
-        const rows = await sheet.getRows();
-        const row = rows.find(item => item.get('ID_Khach') === guestId);
-        if (row) {
-            return { row, sheetTitle };
-        }
-    }
-
-    return null;
+    const { getCachedGuestLookup } = require('../store/inMemoryStore');
+    const lookup = await getCachedGuestLookup();
+    return lookup.get(guestId) || null;
 }
 
+// Đọc danh mục khách hàng từ Google Sheets (Chỉ dùng Sheets API để tải mảng nhẹ, không dùng getRows chậm chạp)
 async function loadGuestLookupAcrossRoles() {
-    const doc = await initSheet();
     const sheetTitles = Object.values(ROLE_SHEETS);
     const lookup = new Map();
 
+    const auth = new google.auth.JWT({
+        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    const sheets = google.sheets({ version: 'v4', auth });
+
     for (const sheetTitle of sheetTitles) {
-        const sheet = doc.sheetsByTitle[sheetTitle];
-        if (!sheet) {
-            continue;
-        }
-
-        const rows = await sheet.getRows({ offset: 0 });
-        for (const row of rows) {
-            const guestId = row.get('ID_Khach');
-            if (!guestId || lookup.has(guestId)) {
-                continue;
-            }
-
-            lookup.set(guestId, {
-                row,
-                sheetTitle,
+        try {
+            const response = await sheets.spreadsheets.values.get({
+                spreadsheetId: process.env.SHEET_ID,
+                range: `${sheetTitle}!A2:F`, // Đọc toàn bộ bảng từ dòng 2
             });
+
+            const rows = response.data.values || [];
+            rows.forEach((rowData, index) => {
+                const guestId = rowData[0];
+                if (!guestId || lookup.has(guestId)) return;
+
+                const rowIndex = index + 2; // Số hàng 1-based thực tế trên Sheet
+                lookup.set(guestId, {
+                    row: {
+                        rowIndex,
+                        get: (colName) => {
+                            const mapping = {
+                                'ID_Khach': rowData[0],
+                                'Link_Goc': rowData[1],
+                                'Nguoi_Moi': rowData[2],
+                                'Trang_Thai': rowData[3],
+                                'Phan_Loai': rowData[4],
+                                'So_Lan_Moi': rowData[5],
+                            };
+                            return mapping[colName] || '';
+                        }
+                    },
+                    sheetTitle,
+                });
+            });
+        } catch (e) {
+            console.error(`Lỗi tải dữ liệu cho sheet ${sheetTitle}:`, e.message);
         }
     }
 
     return lookup;
 }
 
+// Đọc trực tiếp dòng dữ liệu của một phân loại
 async function loadRoleRows(role) {
     const sheet = await getOrCreateRoleSheet(role);
     const sheetTitle = resolveSheetTitle(role);
@@ -106,22 +110,20 @@ async function loadRoleRows(role) {
     });
     const sheets = google.sheets({ version: 'v4', auth });
 
-    // Đọc trực tiếp dải ô dữ liệu từ hàng 2 đến hàng 1000 để lấy data mới nhất 100%
     const response = await sheets.spreadsheets.values.get({
         spreadsheetId: process.env.SHEET_ID,
-        range: `${sheetTitle}!A2:F1000`, 
+        range: `${sheetTitle}!A2:F`, 
     });
 
     const rows = response.data.values || [];
     const lookup = new Map();
 
-    // Map dữ liệu dựa trên mảng thuần túy (0: ID_Khach, 1: Link_Goc, 2: Nguoi_Moi, 3: Trang_Thai, 4: Phan_Loai, 5: So_Lan_Moi)
     rows.forEach((row, index) => {
         const guestId = row[0];
         if (!guestId) return;
 
         lookup.set(guestId, {
-            rowIndex: index + 2, // Chuyển về đúng số hàng thực tế trên Sheet (Hàng đầu tiên của data là hàng 2)
+            rowIndex: index + 2, 
             guestId: row[0],
             originalLink: row[1],
             nguoiMoi: row[2],
@@ -134,30 +136,47 @@ async function loadRoleRows(role) {
     return { sheet, lookup };
 }
 
-// Khởi tạo hoặc cập nhật phân loại (Khách mời/Chuyên gia)
+// Khởi tạo hoặc cập nhật phân loại (Khách mời/Chuyên gia) dùng Sheets API tốc độ cao
 async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
-    const sheet = await getOrCreateRoleSheet(role);
-    const rows = await sheet.getRows();
-    const existingGuest = rows.find(row => row.get('ID_Khach') === guestId);
+    const lookup = await loadGuestLookupAcrossRoles();
+    const existing = lookup.get(guestId);
+    const sheetTitle = resolveSheetTitle(role);
 
-    if (existingGuest) {
-        existingGuest.set('Phan_Loai', role);
-        existingGuest.set('Nguoi_Moi', memberName);
-        existingGuest.set('Link_Goc', originalLink);
-        await existingGuest.save();
+    const auth = new google.auth.JWT({
+        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    if (existing && existing.sheetTitle === sheetTitle) {
+        const rowIndex = existing.row.rowIndex;
+        const currentCount = parseInt(existing.row.get('So_Lan_Moi') || 0);
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.SHEET_ID,
+            range: `${sheetTitle}!A${rowIndex}:F${rowIndex}`,
+            valueInputOption: 'USER_ENTERED',
+            requestBody: {
+                values: [[guestId, originalLink, memberName, existing.row.get('Trang_Thai'), role, String(currentCount)]],
+            },
+        });
+
         return {
             status: 'updated',
-            inviteCount: parseInt(existingGuest.get('So_Lan_Moi') || 0),
+            inviteCount: currentCount,
         };
     } else {
-        await sheet.addRow({
-            ID_Khach: guestId,
-            Link_Goc: originalLink,
-            Nguoi_Moi: memberName,
-            Trang_Thai: 'Đang khởi tạo',
-            Phan_Loai: role,
-            So_Lan_Moi: '0'
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: process.env.SHEET_ID,
+            range: `${sheetTitle}!A:F`,
+            valueInputOption: 'USER_ENTERED',
+            insertDataOption: 'INSERT_ROWS',
+            requestBody: {
+                values: [[guestId, originalLink, memberName, 'Đang khởi tạo', role, '0']],
+            },
         });
+
         return {
             status: 'created',
             inviteCount: 0,
@@ -165,117 +184,86 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
     }
 }
 
-/**
- * Batch version of saveOrUpdateRole – dùng cho việc xử lý danh sách lớn.
- * Trả về thống kê {created, updated}
- */
-async function batchSaveOrUpdate(links, role, memberName) {
-    // links: [{guestId, originalLink}]
-    const sheet = await getOrCreateRoleSheet(role);
-    const existingLookup = await loadGuestLookupAcrossRoles(); // Map<guestId, {row, sheetTitle}>
-
-    const rowsToAdd = [];
-    const rowsToUpdate = []; // {rowIndex, values}
-
-    // Google Sheets API works with 0‑based row index within the sheet (excluding header)
-    const headerRowCount = 1; // first row is header
-
-    for (const { guestId, originalLink } of links) {
-        const existing = existingLookup.get(guestId);
-        if (existing && existing.sheetTitle === resolveSheetTitle(role)) {
-            // Prepare update – we need the row index of the existing row
-            const rowIndex = existing.row.rowIndex - headerRowCount; // rowIndex for API (0‑based after header)
-            rowsToUpdate.push({
-                rowIndex,
-                values: [guestId, originalLink, memberName, 'Đang khởi tạo', role, '0'],
-            });
-        } else {
-            rowsToAdd.push([guestId, originalLink, memberName, 'Đang khởi tạo', role, '0']);
-        }
-    }
-
-    // Prepare Google Sheets batchUpdate request
-    const auth = new google.auth.JWT({
-        email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
-
-    const requests = [];
-
-    if (rowsToAdd.length) {
-        // Append rows at the end of the sheet
-        requests.push({
-            appendCells: {
-                sheetId: sheet.sheetId,
-                rows: rowsToAdd.map(row => ({
-                    values: row.map(v => ({ userEnteredValue: { stringValue: v } })),
-                })),
-                fields: '*',
-            },
-        });
-    }
-
-    rowsToUpdate.forEach(u => {
-        requests.push({
-            updateCells: {
-                start: { sheetId: sheet.sheetId, rowIndex: u.rowIndex, columnIndex: 0 },
-                rows: [{
-                    values: u.values.map(v => ({ userEnteredValue: { stringValue: v } })),
-                }],
-                fields: '*',
-            },
-        });
-    });
-
-    if (requests.length === 0) {
-        return { created: 0, updated: 0 };
-    }
-
-    const sheets = google.sheets({ version: 'v4', auth });
-    await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: process.env.SHEET_ID,
-        requestBody: { requests },
-    });
-
-    return { created: rowsToAdd.length, updated: rowsToUpdate.length };
-}
-
-// Hành động: Mời (Cộng dồn số lần)
+// Tăng số lần mời của khách hàng
 async function incrementInviteCount(guestId, role) {
-    const row = await getGuestRow(guestId, role);
-    if (row) {
-        const currentCount = parseInt(row.get('So_Lan_Moi') || 0);
-        row.set('So_Lan_Moi', (currentCount + 1).toString());
-        row.set('Trang_Thai', 'Đang liên hệ');
-        await row.save();
-        return currentCount + 1;
+    const lookup = await loadGuestLookupAcrossRoles();
+    const existing = lookup.get(guestId);
+    const sheetTitle = resolveSheetTitle(role);
+
+    if (existing && existing.sheetTitle === sheetTitle) {
+        const rowIndex = existing.row.rowIndex;
+        const currentCount = parseInt(existing.row.get('So_Lan_Moi') || 0);
+        const newCount = currentCount + 1;
+
+        const auth = new google.auth.JWT({
+            email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+            key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+        const sheets = google.sheets({ version: 'v4', auth });
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.SHEET_ID,
+            range: `${sheetTitle}!D${rowIndex}:F${rowIndex}`, 
+            valueInputOption: 'USER_ENTERED',
+            requestBody: {
+                values: [['Đang liên hệ', role, String(newCount)]],
+            },
+        });
+
+        return newCount;
     }
     return 0;
 }
 
-// Hành động: Đánh dấu không mời lại
+// Đánh dấu không mời lại
 async function markAsDoNotInvite(guestId, role) {
-    const row = await getGuestRow(guestId, role);
-    if (row) {
-        row.set('Trang_Thai', 'Không mời lại');
-        await row.save();
+    const lookup = await loadGuestLookupAcrossRoles();
+    const existing = lookup.get(guestId);
+    const sheetTitle = resolveSheetTitle(role);
+
+    if (existing && existing.sheetTitle === sheetTitle) {
+        const rowIndex = existing.row.rowIndex;
+
+        const auth = new google.auth.JWT({
+            email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+            key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+        const sheets = google.sheets({ version: 'v4', auth });
+
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.SHEET_ID,
+            range: `${sheetTitle}!D${rowIndex}`, 
+            valueInputOption: 'USER_ENTERED',
+            requestBody: {
+                values: [['Không mời lại']],
+            },
+        });
     }
 }
 
+// Đánh dấu không mời lại hàng loạt
 async function batchMarkDoNotInvite(guestIds, role) {
     if (!Array.isArray(guestIds) || guestIds.length === 0) return { updated: 0 };
-    const sheet = await getOrCreateRoleSheet(role);
-    const rows = await sheet.getRows();
+    const lookup = await loadGuestLookupAcrossRoles();
+    const sheetTitle = resolveSheetTitle(role);
+    
+    const doc = await initSheet();
+    const sheet = doc.sheetsByTitle[sheetTitle];
+    if (!sheet) return { updated: 0 };
+    const sheetId = sheet.sheetId;
+
     const requests = [];
     let updated = 0;
-    for (const row of rows) {
-        const id = row.get('ID_Khach');
-        if (guestIds.includes(id)) {
-            const rowIndex = row.rowIndex - 1; // after header
+
+    for (const id of guestIds) {
+        const existing = lookup.get(id);
+        if (existing && existing.sheetTitle === sheetTitle) {
+            const rowIndex = existing.row.rowIndex - 1; 
             requests.push({
                 updateCells: {
-                    start: { sheetId: sheet.sheetId, rowIndex, columnIndex: 3 }, // column 3 = Trang_Thai
+                    start: { sheetId, rowIndex, columnIndex: 3 }, 
                     rows: [{ values: [{ userEnteredValue: { stringValue: 'Không mời lại' } }] }],
                     fields: 'userEnteredValue'
                 }
@@ -283,8 +271,9 @@ async function batchMarkDoNotInvite(guestIds, role) {
             updated++;
         }
     }
+
     if (requests.length === 0) return { updated: 0 };
-    const { google } = require('googleapis');
+
     const auth = new google.auth.JWT({
         email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
         key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
@@ -298,14 +287,8 @@ async function batchMarkDoNotInvite(guestIds, role) {
     return { updated };
 }
 
-// ... (Giữ nguyên các hàm cũ ở trên) ...
-
-/**
- * Xử lý hàng loạt (Batch) cho hành động Mời / Không mời lại
- * Tối ưu hóa bằng Google Sheets batchUpdate để tránh Rate Limit và Timeout
- */
+// Xử lý hàng loạt các hành động
 async function batchProcessActions(links, role, memberName, actionName) {
-    // Gọi hàm load dữ liệu sạch không qua cache
     const { sheet, lookup } = await loadRoleRows(role);
 
     const rowsToAdd = [];
@@ -324,7 +307,6 @@ async function batchProcessActions(links, role, memberName, actionName) {
         }
 
         if (existing) {
-            // Đọc trực tiếp từ object thuần, không sợ dính bộ nhớ đệm ẩn của thư viện
             let currentCount = parseInt(String(existing.soLanMoi).trim(), 10);
             if (isNaN(currentCount)) {
                 currentCount = 0; 
@@ -338,8 +320,6 @@ async function batchProcessActions(links, role, memberName, actionName) {
                 newStatus = 'Không mời lại';
             }
 
-            // existing.rowIndex lúc này đã là số hàng chuẩn 1-based (ví dụ: 2, 3, 4)
-            // Cần trừ đi 1 để biến thành 0-based index truyền vào API updateCells
             const apiRowIndex = existing.rowIndex - 1;
 
             requests.push({
@@ -401,15 +381,27 @@ async function getOrCreateShareCacheSheet() {
     return sheet;
 }
 
+// Đọc cache link share (Dùng Sheets API nhẹ)
 async function getShareCache(shareUrl) {
     try {
-        const sheet = await getOrCreateShareCacheSheet();
-        const rows = await sheet.getRows();
-        const row = rows.find(r => r.get('Link_Share') === shareUrl);
+        const auth = new google.auth.JWT({
+            email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+            key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+        const sheets = google.sheets({ version: 'v4', auth });
+        
+        const response = await sheets.spreadsheets.values.get({
+            spreadsheetId: process.env.SHEET_ID,
+            range: `${SHARE_CACHE_SHEET}!A2:C`, 
+        });
+        
+        const rows = response.data.values || [];
+        const row = rows.find(r => r[0] === shareUrl);
         if (row) {
             return {
-                originalLink: row.get('Link_Goc'),
-                guestId: row.get('guestId'),
+                originalLink: row[1],
+                guestId: row[2],
             };
         }
     } catch (e) {
@@ -418,21 +410,31 @@ async function getShareCache(shareUrl) {
     return null;
 }
 
+// Ghi cache link share (Dùng Sheets API nhẹ)
 async function setShareCache(shareUrl, originalLink, guestId) {
     try {
-        const sheet = await getOrCreateShareCacheSheet();
-        await sheet.addRow({
-            Link_Share: shareUrl,
-            Link_Goc: originalLink || '',
-            guestId: guestId || '',
-            createdAt: new Date().toISOString(),
+        const auth = new google.auth.JWT({
+            email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+            key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+        const sheets = google.sheets({ version: 'v4', auth });
+        
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: process.env.SHEET_ID,
+            range: `${SHARE_CACHE_SHEET}!A:D`,
+            valueInputOption: 'USER_ENTERED',
+            insertDataOption: 'INSERT_ROWS',
+            requestBody: {
+                values: [[shareUrl, originalLink || '', guestId || '', new Date().toISOString()]],
+            },
         });
     } catch (e) {
         console.error('setShareCache error:', e.message);
     }
 }
+
 module.exports = {
-    getGuestRow,
     findGuestRowAcrossRoles,
     loadGuestLookupAcrossRoles,
     loadRoleRows,
@@ -440,11 +442,8 @@ module.exports = {
     incrementInviteCount,
     markAsDoNotInvite,
     resolveSheetTitle,
-    batchSaveOrUpdate,
     batchMarkDoNotInvite,
     batchProcessActions,
     getShareCache,
     setShareCache,
 };
-
-
