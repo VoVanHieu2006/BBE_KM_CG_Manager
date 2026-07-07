@@ -1,6 +1,7 @@
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const { JWT } = require('google-auth-library');
 const { google } = require('googleapis');
+const { createGuestNode } = require('../utils/guestNodeHelper');
 
 const ROLE_SHEETS = {
     'Khách mời': 'KhachMoi',
@@ -86,23 +87,16 @@ async function loadGuestLookupAcrossRoles() {
                 if (!guestId || lookup.has(guestId)) return;
 
                 const rowIndex = index + 2; // Số hàng 1-based thực tế trên Sheet
-                lookup.set(guestId, {
-                    row: {
-                        rowIndex,
-                        get: (colName) => {
-                            const mapping = {
-                                'ID_Khach': rowData[0],
-                                'Link_Goc': rowData[1],
-                                'Nguoi_Moi': rowData[2],
-                                'Trang_Thai': rowData[3],
-                                'Phan_Loai': rowData[4],
-                                'So_Lan_Moi': rowData[5],
-                            };
-                            return mapping[colName] || '';
-                        }
-                    },
+                lookup.set(guestId, createGuestNode({
+                    rowIndex,
+                    guestId: rowData[0],
+                    originalLink: rowData[1] || '',
+                    nguoiMoi: rowData[2] || '',
+                    trangThai: rowData[3] || 'Đang khởi tạo',
+                    phanLoai: rowData[4] || '',
+                    soLanMoi: rowData[5] || '0',
                     sheetTitle,
-                });
+                }));
             });
         } catch (e) {
             console.error(`Lỗi tải dữ liệu cho sheet ${sheetTitle}:`, e.message);
@@ -147,7 +141,8 @@ async function loadRoleRows(role) {
 
 // Khởi tạo hoặc cập nhật phân loại (Khách mời/Chuyên gia) dùng Sheets API tốc độ cao
 async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
-    const lookup = await loadGuestLookupAcrossRoles();
+    const { getCachedGuestLookup, saveCacheToFile } = require('../store/inMemoryStore');
+    const lookup = await getCachedGuestLookup();
     const existing = lookup.get(guestId);
     const sheetTitle = resolveSheetTitle(role);
 
@@ -166,6 +161,11 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
             },
         });
 
+        // Cập nhật bộ nhớ đệm
+        existing.row.set('Nguoi_Moi', memberName);
+        existing.row.set('Link_Goc', originalLink);
+        saveCacheToFile(lookup);
+
         return {
             status: 'updated',
             inviteCount: currentCount,
@@ -177,6 +177,8 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
             if (oldSheet) {
                 const oldSheetId = oldSheet.sheetId;
                 const oldRowIndex = existing.row.rowIndex;
+                const oldSheetTitle = existing.sheetTitle;
+
                 await sheets.spreadsheets.batchUpdate({
                     spreadsheetId: process.env.SHEET_ID,
                     requestBody: {
@@ -193,6 +195,13 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
                             }
                         ]
                     }
+                }).then(() => {
+                    // Dịch chuyển chỉ số dòng của các hàng phía sau trong bảng cũ
+                    for (const [id, guest] of lookup.entries()) {
+                        if (guest.sheetTitle === oldSheetTitle && guest.row.rowIndex > oldRowIndex) {
+                            guest.row.setRowIndex(guest.row.rowIndex - 1);
+                        }
+                    }
                 }).catch(err => {
                     console.error(`Error deleting old role row in sheet ${existing.sheetTitle}:`, err);
                 });
@@ -202,7 +211,7 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
         const initialStatus = existing ? existing.row.get('Trang_Thai') : 'Đang khởi tạo';
         const initialCount = existing ? parseInt(existing.row.get('So_Lan_Moi') || 0) : 0;
 
-        await sheets.spreadsheets.values.append({
+        const appendResponse = await sheets.spreadsheets.values.append({
             spreadsheetId: process.env.SHEET_ID,
             range: `${sheetTitle}!A:F`,
             valueInputOption: 'USER_ENTERED',
@@ -211,6 +220,24 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
                 values: [[guestId, originalLink, memberName, initialStatus, role, String(initialCount)]],
             },
         });
+
+        // Xác định dòng mới được ghi
+        const updatedRange = appendResponse.data.updates.updatedRange; // ví dụ "ChuyenGia!A25:F25"
+        const match = updatedRange.match(/!A(\d+):/);
+        const newRowIndex = match ? parseInt(match[1], 10) : (lookup.size + 2);
+
+        // Cập nhật bộ nhớ đệm
+        lookup.set(guestId, createGuestNode({
+            rowIndex: newRowIndex,
+            guestId,
+            originalLink,
+            nguoiMoi: memberName,
+            trangThai: initialStatus,
+            phanLoai: role,
+            soLanMoi: String(initialCount),
+            sheetTitle
+        }));
+        saveCacheToFile(lookup);
 
         return {
             status: existing ? 'updated' : 'created',
@@ -221,7 +248,8 @@ async function saveOrUpdateRole(guestId, originalLink, memberName, role) {
 
 // Tăng số lần mời của khách hàng
 async function incrementInviteCount(guestId, role) {
-    const lookup = await loadGuestLookupAcrossRoles();
+    const { getCachedGuestLookup, saveCacheToFile } = require('../store/inMemoryStore');
+    const lookup = await getCachedGuestLookup();
     const existing = lookup.get(guestId);
     const sheetTitle = resolveSheetTitle(role);
 
@@ -241,6 +269,11 @@ async function incrementInviteCount(guestId, role) {
             },
         });
 
+        // Cập nhật bộ nhớ đệm
+        existing.row.set('Trang_Thai', 'Đang liên hệ');
+        existing.row.set('So_Lan_Moi', newCount);
+        saveCacheToFile(lookup);
+
         return newCount;
     }
     return 0;
@@ -248,7 +281,8 @@ async function incrementInviteCount(guestId, role) {
 
 // Đánh dấu không mời lại
 async function markAsDoNotInvite(guestId, role) {
-    const lookup = await loadGuestLookupAcrossRoles();
+    const { getCachedGuestLookup, saveCacheToFile } = require('../store/inMemoryStore');
+    const lookup = await getCachedGuestLookup();
     const existing = lookup.get(guestId);
     const sheetTitle = resolveSheetTitle(role);
 
@@ -265,13 +299,18 @@ async function markAsDoNotInvite(guestId, role) {
                 values: [['Không mời lại']],
             },
         });
+
+        // Cập nhật bộ nhớ đệm
+        existing.row.set('Trang_Thai', 'Không mời lại');
+        saveCacheToFile(lookup);
     }
 }
 
 // Đánh dấu không mời lại hàng loạt
 async function batchMarkDoNotInvite(guestIds, role) {
     if (!Array.isArray(guestIds) || guestIds.length === 0) return { updated: 0 };
-    const lookup = await loadGuestLookupAcrossRoles();
+    const { getCachedGuestLookup, saveCacheToFile } = require('../store/inMemoryStore');
+    const lookup = await getCachedGuestLookup();
     const sheetTitle = resolveSheetTitle(role);
     
     const doc = await initSheet();
@@ -293,6 +332,8 @@ async function batchMarkDoNotInvite(guestIds, role) {
                     fields: 'userEnteredValue'
                 }
             });
+            // Cập nhật bộ nhớ đệm
+            existing.row.set('Trang_Thai', 'Không mời lại');
             updated++;
         }
     }
@@ -304,11 +345,15 @@ async function batchMarkDoNotInvite(guestIds, role) {
         spreadsheetId: process.env.SHEET_ID,
         requestBody: { requests },
     });
+
+    saveCacheToFile(lookup);
     return { updated };
 }
 
 // Xử lý hàng loạt các hành động
 async function batchProcessActions(links, role, memberName, actionName) {
+    const { getCachedGuestLookup, saveCacheToFile } = require('../store/inMemoryStore');
+    const globalLookup = await getCachedGuestLookup();
     const { sheet, lookup } = await loadRoleRows(role);
 
     const rowsToAdd = [];
@@ -356,8 +401,32 @@ async function batchProcessActions(links, role, memberName, actionName) {
                     fields: 'userEnteredValue'
                 }
             });
+
+            // Cập nhật bộ nhớ đệm global
+            const globalExisting = globalLookup.get(guestId);
+            if (globalExisting) {
+                globalExisting.row.set('Nguoi_Moi', memberName);
+                globalExisting.row.set('Trang_Thai', newStatus);
+                globalExisting.row.set('Phan_Loai', role);
+                globalExisting.row.set('So_Lan_Moi', newInviteCount);
+            }
         } else {
             rowsToAdd.push([guestId, originalLink, memberName, newStatus, role, newInviteCount]);
+
+            // Xác định chỉ số hàng mới được thêm
+            const computedRowIndex = (lookup.size + 2) + (rowsToAdd.length - 1);
+
+            // Thêm mới vào bộ nhớ đệm global
+            globalLookup.set(guestId, createGuestNode({
+                rowIndex: computedRowIndex,
+                guestId,
+                originalLink,
+                nguoiMoi: memberName,
+                trangThai: newStatus,
+                phanLoai: role,
+                soLanMoi: String(newInviteCount),
+                sheetTitle: resolveSheetTitle(role)
+            }));
         }
     }
 
@@ -382,6 +451,8 @@ async function batchProcessActions(links, role, memberName, actionName) {
         spreadsheetId: process.env.SHEET_ID,
         requestBody: { requests },
     });
+
+    saveCacheToFile(globalLookup);
 
     return { created: rowsToAdd.length, updated: requests.length - (rowsToAdd.length ? 1 : 0) };
 }

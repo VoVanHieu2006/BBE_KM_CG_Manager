@@ -1,5 +1,9 @@
-const { EVENT_TTL_MS, BATCH_TTL_MS, BATCH_HISTORY_BUTTON_THRESHOLD, GUEST_LOOKUP_TTL_MS } = require('../config');
-const { loadGuestLookupAcrossRoles } = require('../repositories/sheetRepository');
+const fs = require('fs');
+const path = require('path');
+const { EVENT_TTL_MS, BATCH_TTL_MS, BATCH_HISTORY_BUTTON_THRESHOLD } = require('../config');
+const { createGuestNode } = require('../utils/guestNodeHelper');
+
+const cacheFilePath = path.join(__dirname, '../guest_cache.json');
 
 const processedMessageIds = new Map();
 const pendingBatches = new Map();
@@ -48,13 +52,55 @@ function storePendingBatch(sender_psid, links) {
     return batchId;
 }
 
+function saveCacheToFile(lookup) {
+    try {
+        const plainData = {};
+        for (const [guestId, guest] of lookup.entries()) {
+            plainData[guestId] = guest.raw;
+        }
+        fs.writeFileSync(cacheFilePath, JSON.stringify(plainData, null, 2), 'utf-8');
+    } catch (e) {
+        console.error('saveCacheToFile error:', e.message);
+    }
+}
+
+function loadCacheFromFile() {
+    try {
+        if (!fs.existsSync(cacheFilePath)) return null;
+        const raw = fs.readFileSync(cacheFilePath, 'utf-8');
+        const plainData = JSON.parse(raw);
+        const lookup = new Map();
+        for (const [guestId, data] of Object.entries(plainData)) {
+            lookup.set(guestId, createGuestNode(data));
+        }
+        return lookup;
+    } catch (e) {
+        console.error('loadCacheFromFile error:', e.message);
+        return null;
+    }
+}
+
+async function syncCacheFromSheets() {
+    const { loadGuestLookupAcrossRoles } = require('../repositories/sheetRepository');
+    const lookup = await loadGuestLookupAcrossRoles();
+    cachedGuestLookup.data = lookup;
+    cachedGuestLookup.timestamp = Date.now();
+    saveCacheToFile(lookup);
+}
+
 async function getCachedGuestLookup() {
-    const now = Date.now();
-    if (cachedGuestLookup.data && now - cachedGuestLookup.timestamp < GUEST_LOOKUP_TTL_MS) {
+    if (cachedGuestLookup.data) {
         return cachedGuestLookup.data;
     }
-    cachedGuestLookup.data = await loadGuestLookupAcrossRoles();
-    cachedGuestLookup.timestamp = now;
+
+    const fileCache = loadCacheFromFile();
+    if (fileCache) {
+        cachedGuestLookup.data = fileCache;
+        cachedGuestLookup.timestamp = Date.now();
+        return cachedGuestLookup.data;
+    }
+
+    await syncCacheFromSheets();
     return cachedGuestLookup.data;
 }
 
@@ -69,4 +115,7 @@ module.exports = {
     cleanupPendingBatches,
     storePendingBatch,
     getCachedGuestLookup,
+    saveCacheToFile,
+    loadCacheFromFile,
+    syncCacheFromSheets,
 };

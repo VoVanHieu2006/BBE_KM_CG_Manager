@@ -137,6 +137,20 @@ function postWebhook(req, res) {
                 if (webhook_event.message) {
                     const text = webhook_event.message.text;
 
+                    if (text && text.toLowerCase().trim() === '/sync') {
+                        const { syncCacheFromSheets } = require('../store/inMemoryStore');
+                        callSendAPI(sender_psid, { "text": "🔄 Đang đồng bộ lại dữ liệu từ Google Sheets..." });
+                        syncCacheFromSheets()
+                            .then(() => {
+                                callSendAPI(sender_psid, { "text": "✅ Đồng bộ thành công! RAM và tệp cache cục bộ đã được cập nhật mới nhất." });
+                            })
+                            .catch(err => {
+                                console.error('Lỗi sync:', err);
+                                callSendAPI(sender_psid, { "text": `❌ Đồng bộ thất bại: ${err.message}` });
+                            });
+                        return;
+                    }
+
                     // Fallback thông minh: Dịch tin nhắn chữ thường thành hành động Quick Reply 
                     // khi giao diện Messenger của Facebook bị lỗi không gửi kèm payload
                     const detectedRole = detectRoleFromText(text);
