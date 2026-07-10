@@ -52,16 +52,34 @@ function storePendingBatch(sender_psid, links) {
     return batchId;
 }
 
-function saveCacheToFile(lookup) {
+const CACHE_SAVE_DEBOUNCE_MS = 500;
+let saveCacheTimer = null;
+let pendingSaveLookup = null;
+
+async function flushCacheToFile(lookup) {
     try {
         const plainData = {};
         for (const [guestId, guest] of lookup.entries()) {
             plainData[guestId] = guest.raw;
         }
-        fs.writeFileSync(cacheFilePath, JSON.stringify(plainData, null, 2), 'utf-8');
+        // Ghi ra file tạm rồi rename để tránh file hỏng nếu crash giữa chừng
+        const tmpPath = `${cacheFilePath}.tmp`;
+        await fs.promises.writeFile(tmpPath, JSON.stringify(plainData), 'utf-8');
+        await fs.promises.rename(tmpPath, cacheFilePath);
     } catch (e) {
         console.error('saveCacheToFile error:', e.message);
     }
+}
+
+function saveCacheToFile(lookup) {
+    pendingSaveLookup = lookup;
+    if (saveCacheTimer) return;
+    saveCacheTimer = setTimeout(() => {
+        saveCacheTimer = null;
+        const target = pendingSaveLookup;
+        pendingSaveLookup = null;
+        flushCacheToFile(target).catch(() => {});
+    }, CACHE_SAVE_DEBOUNCE_MS);
 }
 
 function loadCacheFromFile() {

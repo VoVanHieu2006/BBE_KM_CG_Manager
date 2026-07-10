@@ -39,8 +39,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
         try {
             const result = await saveOrUpdateRole(guestId, url, memberName, roleName);
             
-            cachedGuestLookup.data = null;
-            cachedGuestLookup.timestamp = 0;
+
 
             let response = {
                 "text": `📊 Hệ thống ghi nhận: ${roleName}.\n👉 Người này đã được mời: ${result.inviteCount} lần.\n\nBạn muốn làm gì tiếp theo?`,
@@ -78,8 +77,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
                 callSendAPI(sender_psid, { "text": "⏩ Đã hủy thao tác. Dữ liệu giữ nguyên trạng thái cũ." });
             }
             
-            cachedGuestLookup.data = null;
-            cachedGuestLookup.timestamp = 0;
+
         } catch (e) { console.error(e); }
 
         pendingSingleLinks.delete(linkRefId);
@@ -164,8 +162,7 @@ async function handleQuickReply(sender_psid, payload, memberName) {
             return;
         }
 
-        cachedGuestLookup.data = null;
-        cachedGuestLookup.timestamp = 0;
+
 
 
         const results = { created: 0, updated: 0, invited: 0, doNotInvite: 0, failed: 0 };

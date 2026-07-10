@@ -15,10 +15,16 @@ function getWebhook(req, res) {
     }
 }
 
+// Một số client Messenger (khi bật Meta AI) tự chèn mention "@MetaAI" đằng trước
+// tin nhắn text thường thay vì gửi quick_reply payload. Bỏ prefix này trước khi detect.
+function stripMentions(text) {
+    return text.replace(/@\S+\s*/g, '').trim();
+}
+
 // Nhận diện vai trò từ văn bản thuần túy (fallback cho các dòng máy bị lỗi mất quick reply payload)
 function detectRoleFromText(text) {
     if (!text || typeof text !== 'string') return null;
-    const clean = text.toLowerCase().trim();
+    const clean = stripMentions(text).toLowerCase();
     if (clean.includes('khách mời') || clean.includes('khach moi')) return 'Khách mời';
     if (clean.includes('chuyên gia') || clean.includes('chuyen gia')) return 'Chuyên gia';
     if (clean.includes('bỏ qua') || clean.includes('bo qua')) return 'BO_QUA';
@@ -28,8 +34,8 @@ function detectRoleFromText(text) {
 // Nhận diện hành động tiếp theo từ văn bản thuần túy
 function detectActionFromText(text) {
     if (!text || typeof text !== 'string') return null;
-    const clean = text.toLowerCase().trim();
-    if (clean === 'mời' || clean === 'moi' || clean === '💌 mời') return 'MOI';
+    const clean = stripMentions(text).toLowerCase();
+    if (clean.includes('mời') || clean.includes('moi') || clean.includes('💌')) return 'MOI';
     if (clean.includes('không mời') || clean.includes('khong moi') || clean.includes('🚫')) return 'KHONG_MOI';
     if (clean.includes('bỏ qua') || clean.includes('bo qua') || clean.includes('⏩')) return 'BO_QUA';
     return null;
