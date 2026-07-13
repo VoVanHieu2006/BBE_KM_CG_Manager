@@ -284,26 +284,43 @@ async function markAsDoNotInvite(guestId, role) {
     const { getCachedGuestLookup, saveCacheToFile } = require('../store/inMemoryStore');
     const lookup = await getCachedGuestLookup();
     const existing = lookup.get(guestId);
-    const sheetTitle = resolveSheetTitle(role);
+    if (!existing) return { ok: false, reason: 'not_found' };
 
-    if (existing && existing.sheetTitle === sheetTitle) {
-        const rowIndex = existing.row.rowIndex;
+    // Guest thực tế nằm ở sheet existing.sheetTitle (có thể khác role được chọn)
+    // -> dùng sheet thật để tránh no-op thầm lặng khi sheetTitle mismatch
+    const sheetTitle = existing.sheetTitle || resolveSheetTitle(role);
+    const rowIndex = existing.row.rowIndex;
+    const oldCount = parseInt(existing.row.get('So_Lan_Moi') || 0);
 
-        const { sheets } = getSheetsClient();
-
+    const { sheets } = getSheetsClient();
+    try {
+        // Backup số lần mời cũ sang cột G trước khi reset
         await sheets.spreadsheets.values.update({
             spreadsheetId: process.env.SHEET_ID,
-            range: `${sheetTitle}!D${rowIndex}`, 
+            range: `${sheetTitle}!G${rowIndex}`,
+            valueInputOption: 'USER_ENTERED',
+            requestBody: { values: [[String(oldCount)]] },
+        });
+        // Chuyển trạng thái + reset So_Lan_Moi = 0 (D:Trang_Thai, E:Phan_Loai, F:So_Lan_Moi)
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: process.env.SHEET_ID,
+            range: `${sheetTitle}!D${rowIndex}:F${rowIndex}`,
             valueInputOption: 'USER_ENTERED',
             requestBody: {
-                values: [['Không mời lại']],
+                values: [['Không mời lại', existing.row.get('Phan_Loai') || role, '0']],
             },
         });
-
-        // Cập nhật bộ nhớ đệm
-        existing.row.set('Trang_Thai', 'Không mời lại');
-        saveCacheToFile(lookup);
+    } catch (e) {
+        console.error('markAsDoNotInvite lỗi ghi sheet:', e);
+        return { ok: false, reason: 'sheet_error' };
     }
+
+    // Cập nhật bộ nhớ đệm
+    existing.row.set('Trang_Thai', 'Không mời lại');
+    existing.row.set('So_Lan_Moi', '0');
+    saveCacheToFile(lookup);
+
+    return { ok: true, oldCount };
 }
 
 // Đánh dấu không mời lại hàng loạt
@@ -381,11 +398,22 @@ async function batchProcessActions(links, role, memberName, actionName) {
                 newInviteCount = (currentCount + 1).toString();
                 newStatus = 'Đang liên hệ';
             } else if (actionName === 'KHONG_MOI') {
-                newInviteCount = currentCount.toString(); 
+                newInviteCount = '0'; // reset: không còn tính là đã mời
                 newStatus = 'Không mời lại';
             }
 
             const apiRowIndex = existing.rowIndex - 1;
+
+            // Backup số lần mời cũ sang cột G khi chuyển [Không mời lại]
+            if (actionName === 'KHONG_MOI') {
+                requests.push({
+                    updateCells: {
+                        start: { sheetId: sheetId, rowIndex: apiRowIndex, columnIndex: 6 },
+                        rows: [{ values: [{ userEnteredValue: { stringValue: String(currentCount) } }] }],
+                        fields: 'userEnteredValue'
+                    }
+                });
+            }
 
             requests.push({
                 updateCells: {

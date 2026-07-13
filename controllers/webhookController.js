@@ -18,7 +18,12 @@ function getWebhook(req, res) {
 // Một số client Messenger (khi bật Meta AI) tự chèn mention "@MetaAI" đằng trước
 // tin nhắn text thường thay vì gửi quick_reply payload. Bỏ prefix này trước khi detect.
 function stripMentions(text) {
-    return text.replace(/@\S+\s*/g, '').trim();
+    if (!text || typeof text !== 'string') return text || '';
+    return text
+        .replace(/@Meta\s*AI/gi, '')   // Meta AI (có hoặc không dấu cách): "@Meta AI" / "@MetaAI"
+        .replace(/@\S+/g, '')           // mọi @mention còn lại (vd: @username, @[123:456])
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 // Nhận diện vai trò từ văn bản thuần túy (fallback cho các dòng máy bị lỗi mất quick reply payload)
@@ -141,6 +146,11 @@ function postWebhook(req, res) {
                 }
 
                 if (webhook_event.message) {
+                    // Chuẩn hóa text 1 lần: bỏ prefix "@Meta AI" (Meta AI client tự chèn)
+                    // và mọi @mention trước khi xử lý mọi nhánh (detect / link / /sync)
+                    if (typeof webhook_event.message.text === 'string') {
+                        webhook_event.message.text = stripMentions(webhook_event.message.text);
+                    }
                     const text = webhook_event.message.text;
 
                     if (text && text.toLowerCase().trim() === '/sync') {

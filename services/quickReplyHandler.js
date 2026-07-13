@@ -71,8 +71,12 @@ async function handleQuickReply(sender_psid, payload, memberName) {
                 const newCount = await incrementInviteCount(guestId, roleName);
                 callSendAPI(sender_psid, { "text": `✅ Đã ghi nhận 1 lượt tiếp cận! Tổng số lần mời hiện tại: ${newCount} lần.` });
             } else if (actionName === 'KHONG_MOI') {
-                await markAsDoNotInvite(guestId, roleName);
-                callSendAPI(sender_psid, { "text": "🚫 Đã chuyển trạng thái thành [Không mời lại]. Hệ thống sẽ phát cảnh báo đỏ nếu có ai gửi lại link này." });
+                const result = await markAsDoNotInvite(guestId, roleName);
+                if (result && result.ok) {
+                    callSendAPI(sender_psid, { "text": `🚫 Đã chuyển trạng thái thành [Không mời lại] (số lần mời cũ: ${result.oldCount}, đã backup). Hệ thống sẽ phát cảnh báo đỏ nếu có ai gửi lại link này.` });
+                } else {
+                    callSendAPI(sender_psid, { "text": "⚠️ Không thể cập nhật trạng thái [Không mời lại] lúc này. Vui lòng gửi /sync rồi thử lại." });
+                }
             } else if (actionName === 'BO_QUA') {
                 callSendAPI(sender_psid, { "text": "⏩ Đã hủy thao tác. Dữ liệu giữ nguyên trạng thái cũ." });
             }
