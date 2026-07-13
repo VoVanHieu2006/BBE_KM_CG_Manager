@@ -27,22 +27,25 @@ function stripMentions(text) {
 }
 
 // Nhận diện vai trò từ văn bản thuần túy (fallback cho các dòng máy bị lỗi mất quick reply payload)
+// Lưu ý: check cụm dài/có phủ định trước cụm ngắn để tránh "không mời" khớp nhầm "mời".
 function detectRoleFromText(text) {
     if (!text || typeof text !== 'string') return null;
     const clean = stripMentions(text).toLowerCase();
-    if (clean.includes('khách mời') || clean.includes('khach moi')) return 'Khách mời';
-    if (clean.includes('chuyên gia') || clean.includes('chuyen gia')) return 'Chuyên gia';
     if (clean.includes('bỏ qua') || clean.includes('bo qua')) return 'BO_QUA';
+    if (clean.includes('chuyên gia') || clean.includes('chuyen gia')) return 'Chuyên gia';
+    if (clean.includes('khách mời') || clean.includes('khach moi')) return 'Khách mời';
     return null;
 }
 
-// Nhận diện hành động tiếp theo từ văn bản thuần túy
+// Nhận diện hành động tiếp theo từ văn bản thuần túy.
+// Ưu tiên: (1) emoji — gần như unique cho mỗi nút, (2) cụm có phủ định "không mời" trước "mời".
+// Trước đây check "mời" trước khiến "🚫 Không mời lại" bị nhận nhầm thành MOI.
 function detectActionFromText(text) {
     if (!text || typeof text !== 'string') return null;
     const clean = stripMentions(text).toLowerCase();
-    if (clean.includes('mời') || clean.includes('moi') || clean.includes('💌')) return 'MOI';
-    if (clean.includes('không mời') || clean.includes('khong moi') || clean.includes('🚫')) return 'KHONG_MOI';
-    if (clean.includes('bỏ qua') || clean.includes('bo qua') || clean.includes('⏩')) return 'BO_QUA';
+    if (clean.includes('🚫') || clean.includes('không mời') || clean.includes('khong moi')) return 'KHONG_MOI';
+    if (clean.includes('💌') || clean.includes('mời') || clean.includes('moi')) return 'MOI';
+    if (clean.includes('⏩') || clean.includes('bỏ qua') || clean.includes('bo qua')) return 'BO_QUA';
     return null;
 }
 
